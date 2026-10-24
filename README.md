@@ -1,0 +1,154 @@
+# dsh-diff-review
+
+DeepSeek Harness 插件：模型**改文件之前**先请你审查，你点「接受」它才真正执行；侧边栏用编辑器风格展示原文与新文的对比并标出改动位置。
+
+## 拦什么
+
+| 操作 | 是否拦截 | 审查面板显示 |
+|---|---|---|
+| `write` 新建文件 | 是 | 新增，全文 `+N` |
+| `write` 覆盖文件 | 是 | 统一 diff / 全文双栏 |
+| `edit` 改文件 | 是 | 统一 diff / 全文双栏（标出改动行） |
+| `pwsh` 里的删除/覆盖命令 | 是 | 命令原文 + 被删文件原文 |
+| `read` / `glob` / `grep` 等只读 | 否 | — |
+
+`pwsh` 只识别会破坏文件的命令：`Remove-Item`(`ri`/`rm`/`del`/`erase`/`rd`/`rmdir`)、`Clear-Content`/`clc`、`Set-Content`/`sc`/`Out-File`/`Add-Content`/`ac`，以及 `>` `>>` `2>` 重定向。带 `-WhatIf` 的干跑、以 `|` 结尾的只读管道、`Get-ChildItem` 之类一律放行。
+
+## 侧边栏
+
+右侧栏新增「改动审查」标签页：
+
+- 顶部：操作徽章（新增/修改/删除）+ 完整路径 + `+N -N` + 视图切换 + 拒绝 + 接受
+- 两种视图：
+  - **改动视图**：统一 diff，左右两列行号，`+`/`-` 标记，未改动处折叠成「⋯ 未改动的 N 行」
+  - **全文视图**：原文 / 新文左右并排，行号跟文件真实行号走，改动行在行号旁画彩色竖条（编辑器 gutter 那种效果）
+- 多个待审查项横排在左侧列表，逐条接受或拒绝
+- 没有待审查项时显示空态
+
+## 安全阀
+
+| 情形 | 行为 | 原因 |
+|---|---|---|
+| 侧边栏没打开 / 页面已关闭 | 直接放行 | 没人能审批时不能把 agent 卡死 |
+| 你中断本轮（Esc） | 取消当次调用 | 跟随 `exec.signal` |
+| 5 分钟没人理 | 放行 | 同上，未答复不等于拒绝 |
+| 插件自己的源码 | 直接放行 | 否则插件坏了就再也修不了（自锁） |
+| 临时目录下的文件 | 直接放行 | `skipTemp` |
+| 二进制 / 超大文件 | 降级为仅统计 | 读不出 UTF-8 时不假装能 diff |
+
+## 安装
+
+### 从 GitHub 安装
+
+```powershell
+dsh plugin add https://github.com/<你的用户名>/dsh-diff-review.git
+# 或简写
+dsh plugin add github:<你的用户名>/dsh-diff-review
+```
+
+装完在 profile 的 `package.json` 里是版本号/仓库形态，与其它插件一致。改代码后需重新装一次。
+
+> Git 托管的插件靠 `prepare` 脚本构建，pnpm 默认会拦住。若安装报 `git-hosted plugins build on install via their prepare script`，把 pnpm 打印的那个 key 写进 `~/.dsh/profiles/<profile>/pnpm-workspace.yaml` 的 `allowBuilds` 下再重试。本插件零依赖、构建只是 `node --check`，确认无风险后再放行。
+
+### 本地开发（软链）
+
+当前开发机用的是 `link:` 依赖，改源码即生效于下次启动：
+
+```powershell
+# profile 里的登记：C:\Users\Administrator\.dsh\profiles\desktop\package.json
+"dsh-diff-review": "link:D:/WP/插件/dsh-diff-review"
+# dsh.profile.bundles 也要含 dsh-diff-review
+```
+
+改完 `lib/*.js` 需要重启 DSH 才生效（profile bundle 随 Host 启动加载，没有热重载）。
+
+## 配置
+
+在 `~/.dsh/profiles/<profile>/cordis.patch.yml` 里给对应条目加 `config:`：
+
+```yaml
+- id: diff-review
+  name: dsh-diff-review
+  config:
+    files: true          # 拦 write/edit
+    shell: true          # 拦 pwsh 里的破坏性命令
+    skipTemp: true       # 跳过临时目录
+    skipSelf: true       # 跳过插件自身（强烈建议保持 true）
+    trace: true          # 写诊断日志到 ~/.dsh/logs/diff-review.log
+    timeoutMs: 300000    # 文件审查超时（毫秒）
+    shellTimeoutMs: 120000
+```
+
+所有键都可省略，缺省用上面的值。类型不符的键会被忽略（不做强制校验，插件零依赖）。
+
+## 卸载
+
+1. 删 `cordis.patch.yml` 里 `- id: diff-review` 那段（若你手动加过）
+2. 从 profile `package.json` 的 `dsh.profile.bundles` 与 `dependencies` 里移除 `dsh-diff-review`
+3. 重启 DSH
+
+本插件**没有**关掉任何内置插件，也没有改写宿主的 `disabled` 列表，卸载不会留下副作用。
+
+## 自测
+
+两套离线测试，不连 GUI、不写真文件：
+
+```powershell
+cd D:\WP\插件\dsh-diff-review
+node test\gate.test.mjs     # 闸门：拦截/放行/接受/拒绝/中断/自我豁免/兜底
+node test\render.test.cjs   # 面板：空态诊断、改动视图、全文视图、删除态
+```
+
+> 别用 `node --run test` / `npm test`：本机 Node 在含中文的路径下会把它算成 `D:\WP\???\...` 而报「Can't find package.json」。`package.json` 里仍留了 `scripts.test`，换到纯 ASCII 路径时可用。
+
+闸门测试用 mock 的 `ctx` 直接驱动真实的 `apply(ctx)`，覆盖 25 项断言：`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`-WhatIf`/`Get-ChildItem`/`Write-Host` 放行、自我豁免、临时目录豁免、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起。
+
+面板测试用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch：验证空态五行诊断、改动视图有 `+`/`-` 标记、全文视图有双栏与 gutter 竖条、删除态第二栏显示「文件将被删除」。
+
+## 排错
+
+没被拦住时，先看日志，再看面板。
+
+### 日志（推荐，不依赖打开侧栏）
+
+`trace: true`（默认）时，每次闸门调用、挂起、裁决、路由拒绝都会追加一行到 `~/.dsh/logs/diff-review.log`（Windows 上是 `C:\Users\<你>\.dsh\logs\diff-review.log`）。
+
+```powershell
+Get-Content ~\.dsh\logs\diff-review.log -Tail 30
+# 只看某个工具
+Select-String -Path ~\.dsh\logs\diff-review.log -Pattern '"tool":"write"'
+```
+
+日志只记「状态变化」：轮询心跳首次出现或间断后恢复各记一次（`poller`），不会每 1.2s 刷屏。没有 `poller` 行就说明浏览器半从没连上，闸门必然一直是「未布防」。
+
+典型序列：
+
+```
+... poller {"first":true,"gapMs":-1}          ← 侧栏连上了，闸门开始布防
+... park {"tool":"write","path":"...","pending":1}   ← 拦下了，等你点按钮
+... verdict {"id":"...","outcome":"accept"}   ← 你点了接受，随后工具真的执行
+```
+
+### 面板
+
+打开右侧「改动审查」Tab，空态会直接列出闸门的诊断：
+
+- `闸门已检查 N 次 · 最近工具 X · 结果 Y` —— `Y` 就是放行原因，见下表
+- `布防 no · 心跳龄 -1ms` —— 说明页面从没轮询过，即 Tab 没打开
+- `最近调用：write:not-armed → read:not-gated` —— 按时间顺序看最近 12 次
+
+| `结果` | 含义 |
+|---|---|
+| `not-armed` | 侧边栏没在轮询（Tab 没开 / bundle 没加载），属正常放行 |
+| `not-gated` | 工具不在拦截范围（如 `read`） |
+| `no-session` | 拿不到会话工作目录 |
+| `temp-skipped` / `self-skipped` | 命中临时目录 / 插件自身豁免 |
+| `identical` / `edit-no-match` / `edit-ambiguous` | 改动本身无效或歧义，交给宿主自己报错 |
+| `shell-not-destructive` | `pwsh` 命令不含破坏性操作 |
+
+## 实现要点
+
+- **闸门**：`tools/pre-execute` 的 async waterfall。挂起时只 await 一个 Promise，同时监听 `exec.signal`，宿主等多久都不会 abandon 我们的 promise。
+- **通道**：自建同源 HTTP 路由 `/diff-review/api/{list,detail,decide,decideAll,heartbeat}`，前面挂 `ctx.connection.requestRejection` 做浏览器信任校验。Electron 壳把 `dsh-app://app/` 的请求转发到 Host 并自动带认证 cookie，所以浏览器侧同源可达；从 Node 直接探测会 403，属正常。
+- **diff**：自己算 LCS（`Int32Array` DP，超 400 万格降级为全删全增），零外部依赖。
+- **布防**：侧边栏每 1.2s 轮询 `list`，该调用同时刷新心跳；心跳 180s 内有效才算「布防」，否则闸门一律放行。窗口不可见时 Chromium 会把 `setInterval` 压到约 60s 一跳，窗口必须留得比这个大，否则切走窗口就等于放行。

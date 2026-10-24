@@ -1,0 +1,54 @@
+{
+  "name": "dsh-diff-review",
+  "version": "0.1.0",
+  "description": "Review file changes before they happen — diff preview and approve/reject in the sidebar.",
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "diff",
+    "review",
+    "approval"
+  ],
+  "scripts": {
+    "test": "node test/gate.test.mjs && node test/render.test.cjs"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "package.json"
+  ],
+  "icon": "./icon.svg",
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.1-rc.1 <0.2.2-0"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "adapter": {
+      "cliVersion": "0.2.1-rc.2"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-modules",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    }
+  }
+}

@@ -1,0 +1,17 @@
+# 依赖（本插件零运行时依赖，正常不会有）
+node_modules/
+
+# 项目内部文档（含本机绝对路径，不入库）
+.claude/
+
+# 本地临时与诊断产物
+.dsh/
+*.log
+*.tgz
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store

@@ -1,0 +1,9 @@
+# Normalise to LF in the repo and in the working tree so a clone on any
+# platform gets byte-identical files (the plugin ships plain ESM/CJS sources).
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.webp binary
+*.ico binary
