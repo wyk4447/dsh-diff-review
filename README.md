@@ -52,12 +52,13 @@ dsh plugin add github:<你的用户名>/dsh-diff-review
 
 ### 本地开发（软链）
 
-当前开发机用的是 `link:` 依赖，改源码即生效于下次启动：
+调试插件本身时用 `link:`，改源码即生效于下次启动：
 
 ```powershell
-# profile 里的登记：C:\Users\Administrator\.dsh\profiles\desktop\package.json
-"dsh-diff-review": "link:D:/WP/插件/dsh-diff-review"
-# dsh.profile.bundles 也要含 dsh-diff-review
+# ~/.dsh/profiles/<profile>/package.json
+#   dependencies 里加：
+"dsh-diff-review": "link:<你 clone 下来的绝对路径>"
+#   dsh.profile.bundles 里也要加 "dsh-diff-review"
 ```
 
 改完 `lib/*.js` 需要重启 DSH 才生效（profile bundle 随 Host 启动加载，没有热重载）。
@@ -94,12 +95,11 @@ dsh plugin add github:<你的用户名>/dsh-diff-review
 两套离线测试，不连 GUI、不写真文件：
 
 ```powershell
-cd D:\WP\插件\dsh-diff-review
 node test\gate.test.mjs     # 闸门：拦截/放行/接受/拒绝/中断/自我豁免/兜底
 node test\render.test.cjs   # 面板：空态诊断、改动视图、全文视图、删除态
 ```
 
-> 别用 `node --run test` / `npm test`：本机 Node 在含中文的路径下会把它算成 `D:\WP\???\...` 而报「Can't find package.json」。`package.json` 里仍留了 `scripts.test`，换到纯 ASCII 路径时可用。
+> 别用 `node --run test` / `npm test`：Windows 上 Node 在含非 ASCII 字符的路径下会把它算成乱码路径而报「Can't find package.json」。`package.json` 里仍留了 `scripts.test`，放在纯 ASCII 路径下可用。
 
 闸门测试用 mock 的 `ctx` 直接驱动真实的 `apply(ctx)`，覆盖 25 项断言：`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`-WhatIf`/`Get-ChildItem`/`Write-Host` 放行、自我豁免、临时目录豁免、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起。
 
