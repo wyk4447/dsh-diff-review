@@ -330,8 +330,10 @@ async function main() {
         { id: 'c4', sessionId: 's1', tool: 'write', displayPath: 'D:/w/app.js', op: 'update', added: 1, removed: 1, oldLineCount: 3, newLineCount: 3, truncated: false, reviewable: true },
       ],
       diag: null,
-      turn: 4,
-      turnAllowed: false,
+      // The poller requests no particular session, so the host answers with whole
+      // tables and the pane looks up the id of the change it is showing.
+      turns: { s1: 4 },
+      wavedThrough: {},
     },
   }
   detailPayload = {
@@ -354,13 +356,13 @@ async function main() {
 
   // Without a turn number the exemption cannot be keyed, so the button must stay
   // out of the way rather than offer something that would never expire.
-  listPayload.value.turn = null
+  listPayload.value.turns = {}
   await poll()
   out = await render()
   if (out.includes('本轮全允许')) throw new Error('the button rendered without a known turn')
 
-  listPayload.value.turn = 4
-  listPayload.value.turnAllowed = true
+  listPayload.value.turns = { s1: 4 }
+  listPayload.value.wavedThrough = { s1: 4 }
   await poll()
   out = await render()
   if (!out.includes('本轮已放行后续写入')) throw new Error('the exemption was not announced')
