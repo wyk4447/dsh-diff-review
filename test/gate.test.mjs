@@ -377,6 +377,13 @@ for (const command of [
     `shell shape confirms the command ${command}`,
     parked.item !== undefined && parked.item.reason === 'shell-command' && parked.detail.rows.length === 0,
   )
+  // A shape match has no file of its own. Its `path` used to be the verb, which the
+  // panel rendered as a file name — the review of `iex $code` claimed to be creating
+  // a file called `iex`. The entry must carry no path and say it is a command.
+  check(
+    `shell shape has no file name ${command}`,
+    parked.item !== undefined && parked.item.op === 'shell' && parked.item.displayPath === '',
+  )
   await call(route, 'decide', { id: parked.item.id, action: 'accept' })
   await parked.parked
 }

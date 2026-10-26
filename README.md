@@ -38,7 +38,7 @@ DeepSeek Harness 插件：模型**改文件之前**先请你审查，你点「�
 
 右侧栏新增「改动审查」标签页：
 
-- 顶部：操作徽章（新增/修改/删除）+ 文件名与所在目录分两行显示（像编辑器的标签页）+ `+N -N` + 视图切换 + 拒绝 + 接受
+- 顶部：操作徽章（新增/修改/删除/命令）+ 文件名与所在目录分两行显示（像编辑器的标签页）+ `+N -N` + 视图切换 + 拒绝 + 接受。只有命令层面能确认的改动（`iex $code`、`git clean -fdx`）根本没有文件名，此时徽章写「命令」、下面直接给命令原文，不会把动词当成文件名
 - 两种视图：
   - **改动视图**：统一 diff，左右两列行号，`+`/`-` 标记，未改动处折叠成「⋯ 未改动的 N 行」；被改写的那一行除了整行底色，改动到的那几个字还会再加一层更深的底色（IDEA 那种行内高亮）
   - **全文视图**：原文 / 新文左右并排，行号跟文件真实行号走，改动行在左边距画彩色竖条（编辑器 gutter 那种效果）；**拖动或滚动任意一侧，另一侧的行与列同步跟动**
@@ -128,9 +128,9 @@ node test\render.test.cjs   # 面板：空态诊断、改动视图、全文视�
 
 > 别用 `node --run test` / `npm test`：Windows 上 Node 在含非 ASCII 字符的路径下会把它算成乱码路径而报「Can't find package.json」。`package.json` 里仍留了 `scripts.test`，放在纯 ASCII 路径下可用。
 
-闸门测试用 mock 的 `ctx` 直接驱动真实的 `apply(ctx)`，覆盖 168 项断言：`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建文件四种）、同一命令里赋值后写出的变量（`$t = 'one'; Set-Content -Value $t`、反引号转义还原、`$p = 'D:/w/a.txt'; Remove-Item $p` 解析成真实文件、`$dir` 参与路径拼接、`"hello $n"` 插值）、运行期才算出来的值降级为命令级（`$t = 'a' + 'b'`、`$env:USERNAME`）、按形状识别的十六种改写命令（`Set-Item`/`Rename-Item`/`New-Item`/`Tee-Object`/`Export-Csv`/`[IO.File]::Delete`/`cmd /c del`/`iex`/`Invoke-Expression`/`node -e`/`python -c`/`powershell -EncodedCommand`/`git clean`/`git checkout --`/管道右端无目标）且参数是字面量时仍出真 diff、`-WhatIf`/`Get-ChildItem`/`Write-Host`/`New-Object`/`Add-Type`/`Clear-Host`/`git status`/`node --version` 放行、通配与变量目标的命令级确认（`$p`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、脚本块里的删除（`if (...) { ... }`、`foreach (...) { ... }`、`& { ... }`）、同一命令内赋值参与路径解析、逗号并列多个目标、`$env:TEMP` 目标按临时目录放行、自我豁免、临时目录豁免、工作区 `.dsh/tmp` 豁免且不误豁免 `.dsh/tmpfoo`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起。
+闸门测试用 mock 的 `ctx` 直接驱动真实的 `apply(ctx)`，覆盖 174 项断言：`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建文件四种）、同一命令里赋值后写出的变量（`$t = 'one'; Set-Content -Value $t`、反引号转义还原、`$p = 'D:/w/a.txt'; Remove-Item $p` 解析成真实文件、`$dir` 参与路径拼接、`"hello $n"` 插值）、运行期才算出来的值降级为命令级（`$t = 'a' + 'b'`、`$env:USERNAME`）、按形状识别的十六种改写命令（`Set-Item`/`Rename-Item`/`New-Item`/`Tee-Object`/`Export-Csv`/`[IO.File]::Delete`/`cmd /c del`/`iex`/`Invoke-Expression`/`node -e`/`python -c`/`powershell -EncodedCommand`/`git clean`/`git checkout --`/管道右端无目标）且参数是字面量时仍出真 diff、形状命中但没有文件名的条目（`iex`/`git clean`/管道右端）标记为命令级且不带路径（`op === 'shell'`、`displayPath` 为空，避免把动词当成文件名）、`-WhatIf`/`Get-ChildItem`/`Write-Host`/`New-Object`/`Add-Type`/`Clear-Host`/`git status`/`node --version` 放行、通配与变量目标的命令级确认（`$p`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、脚本块里的删除（`if (...) { ... }`、`foreach (...) { ... }`、`& { ... }`）、同一命令内赋值参与路径解析、逗号并列多个目标、`$env:TEMP` 目标按临时目录放行、自我豁免、临时目录豁免、工作区 `.dsh/tmp` 豁免且不误豁免 `.dsh/tmpfoo`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起。
 
-面板测试用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch：验证空态五行诊断、改动视图有 `+`/`-` 标记、改写行只有真正变化的那几个字被加深高亮（前缀不被误涂）、全文视图有双栏与 gutter 竖条、**拖动一侧另一侧同步且不回弹**、删除态第二栏显示「文件将被删除」、命令级审查不出空代码区且用「无法预知最终内容」而不是「改动过大」。
+面板测试用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch：验证空态五行诊断、改动视图有 `+`/`-` 标记、改写行只有真正变化的那几个字被加深高亮（前缀不被误涂）、全文视图有双栏与 gutter 竖条、**拖动一侧另一侧同步且不回弹**、删除态第二栏显示「文件将被删除」、命令级审查不出空代码区且用「无法预知最终内容」而不是「改动过大」、命令级条目不再编造文件名（`iex $code` 的面板不显示任何文件名）。
 
 ## 排错
 

@@ -292,6 +292,30 @@ async function main() {
   out = await render()
   if (!out.includes(wrongForCommand)) throw new Error('an oversized change lost its own wording')
   if (out.includes(rightForCommand)) throw new Error('an oversized change claimed to be a command')
+
+  // A shape match with no file of its own must not borrow the verb as a file name:
+  // reviewing `iex $code` used to name the entry after `iex`, which reads as if a
+  // file called `iex` were about to be created. The header names the shape instead.
+  listPayload.value.changes[0] = {
+    id: 'c3',
+    sessionId: 's1',
+    tool: 'pwsh',
+    displayPath: '',
+    op: 'shell',
+    added: 0,
+    removed: 0,
+    oldLineCount: 0,
+    newLineCount: 0,
+    truncated: false,
+    reviewable: false,
+    reason: 'shell-command',
+    command: "iex $code",
+  }
+  detailPayload = { ok: true, value: { change: { id: 'c3' }, rows: [], before: '', after: '' } }
+  await poll()
+  out = await render()
+  if (!out.includes('iex $code')) throw new Error('a fileless review lost its command')
+  if (out.includes('<dshr-name>')) throw new Error('a fileless review invented a file name')
   console.log('command-level review: OK')
 
   console.log('client render smoke: OK')
