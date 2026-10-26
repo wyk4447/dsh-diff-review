@@ -539,6 +539,19 @@ for (const harmless of [
   check(`shell shape bypass ${harmless}`, (await gate(exec('pwsh', { command: harmless }), next)).kind === 'allow')
 }
 
+// Emptying a file leaves the file in place and the result is the known empty
+// string, so it is an edit with a diff — not a delete. It used to sit in the
+// delete list, which painted the whole file as gone and kept it asking even
+// inside an exempt request.
+const cleared = await parkShell("Clear-Content -Path 'D:/w/a.txt'")
+check('shell clear-content parks', cleared.item !== undefined)
+check('shell clear-content is an update', cleared.item !== undefined && cleared.item.op === 'update')
+check('shell clear-content is reviewable', cleared.item !== undefined && cleared.item.reviewable === true)
+check('shell clear-content shows the file emptied', cleared.detail.after === '')
+check('shell clear-content removes every line', cleared.detail.before !== '' && cleared.item.removed > 0 && cleared.item.added === 0)
+await call(route, 'decide', { id: cleared.item.id, action: 'accept' })
+check('shell clear-content accept allows', (await cleared.parked).kind === 'allow')
+
 /* ---- self + temp exemptions ---- */
 await call(route, 'list', {})
 // Derived from this file's own location so the test survives a clone anywhere.
@@ -632,6 +645,23 @@ const listedDelete = await call(route, 'list', { sessionId: 's1' })
 check('delete still parks inside an exempt request', listedDelete.value.changes.length === 1)
 await call(route, 'decide', { id: listedDelete.value.changes[0].id, action: 'reject' })
 check('delete inside an exempt request can be rejected', (await deleteInTurn).kind === 'deny')
+
+// Emptying a file is an edit, not a removal: the file is still there afterwards,
+// and the panel can show every line as removed. Treating it as a delete kept it
+// gated inside an exempt request, which is exactly the interruption the button
+// promised to stop. `Rename-Item` moves the file instead, so it stays gated.
+await call(route, 'list', {})
+const truncateInTurn = await gate(exec('pwsh', { command: "Clear-Content -Path 'D:/w/a.txt'" }), next)
+check('emptying a file is allowed inside an exempt request', truncateInTurn.kind === 'allow')
+const listedTruncate = await call(route, 'list', { sessionId: 's1' })
+check('emptying a file did not park', listedTruncate.value.changes.length === 0)
+
+const renameInTurn = gate(exec('pwsh', { command: "Rename-Item -Path 'D:/w/a.txt' -NewName 'b.txt'" }), next)
+await wait(30)
+const listedRename = await call(route, 'list', { sessionId: 's1' })
+check('renaming still parks inside an exempt request', listedRename.value.changes.length === 1)
+await call(route, 'decide', { id: listedRename.value.changes[0].id, action: 'accept' })
+check('rename inside an exempt request can be accepted', (await renameInTurn).kind === 'allow')
 
 // The next request asks again.
 turnEvent('turn/end', 7)
