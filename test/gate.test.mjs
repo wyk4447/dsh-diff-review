@@ -125,7 +125,6 @@ for (const harmless of ["Remove-Item 'D:/w/a.txt' -WhatIf", 'Get-ChildItem D:/w'
 // as the literal name `$p`, resolved to nothing, and went through unreviewed.
 const expanded = [
   'Remove-Item -LiteralPath $p -Force',
-  'Remove-Item $env:TEMP\\probe.txt',
   'Remove-Item -LiteralPath "${target}"',
   'Set-Content -Path $out -Value hi',
 ]
@@ -139,6 +138,32 @@ for (const command of expanded) {
   check(`shell expanded target reject denies ${command}`, (await parkedExpanded).kind === 'deny')
 }
 
+// `$env:TEMP` is the one expansion the host can replay, and replaying it turns a
+// throwaway scratch delete into a path `isTempPath` recognises — so it must be
+// skipped, not parked. Left unexpanded it never matched, and every cleanup of a
+// file in the OS temp directory asked the user to approve it.
+await call(route, 'list', {})
+const parkedEnvTemp = gate(exec('pwsh', { command: 'Remove-Item $env:TEMP\\probe.txt -Force' }), next)
+check('shell env temp target is skipped', (await parkedEnvTemp).kind === 'allow')
+const listedEnvTemp = await call(route, 'list', {})
+check('shell env temp target leaves nothing pending', listedEnvTemp.value.changes.length === 0)
+
+// A comma-separated list can sit in one argument: `Remove-Item 'a.txt','b.txt'`.
+// The commas are outside the quotes, so each name needs unquoting on its own.
+await call(route, 'list', {})
+const parkedList = gate(exec('pwsh', { command: "Remove-Item 'D:/w/a.txt','D:/w/b.txt' -Force" }), next)
+await wait(30)
+const listedList = await call(route, 'list', {})
+const listTargets = listedList.value.changes.length === 1 ? listedList.value.changes[0].targets : []
+check('shell comma list parks', listedList.value.changes.length === 1)
+check(
+  'shell comma list keeps both names clean',
+  Array.isArray(listTargets) && listTargets.length === 2
+    && listTargets[0].path === 'D:/w/a.txt' && listTargets[1].path === 'D:/w/b.txt',
+)
+await call(route, 'decide', { id: listedList.value.changes[0].id, action: 'accept' })
+check('shell comma list accept allows', (await parkedList).kind === 'allow')
+
 // The exemption has to stay narrow: a literal `$` in a file name is a real path.
 await call(route, 'list', {})
 const parkedDollar = gate(exec('pwsh', { command: "Remove-Item -LiteralPath 'D:/w/a$b.txt'" }), next)
@@ -148,6 +173,33 @@ check('shell literal dollar name still parks', listedDollar.value.changes.length
 check('shell literal dollar name keeps its path', listedDollar.value.changes[0].path === 'D:/w/a$b.txt')
 await call(route, 'decide', { id: listedDollar.value.changes[0].id, action: 'accept' })
 check('shell literal dollar name accept allows', (await parkedDollar).kind === 'allow')
+
+// A script block is a statement sequence: `if (Test-Path $t) { Remove-Item $t }`
+// used to tokenize as one run starting with `if(Test-Path`, match no cmdlet, and
+// let the delete inside it through unreviewed. Every block form must park.
+for (const command of [
+  "if (Test-Path 'D:/w/a.txt') { Remove-Item -LiteralPath 'D:/w/a.txt' -Force }",
+  "& { Remove-Item -LiteralPath 'D:/w/a.txt' }",
+  "foreach ($f in @('D:/w/a.txt')) { Remove-Item $f -Force }",
+]) {
+  await call(route, 'list', {})
+  const parkedBlock = gate(exec('pwsh', { command }), next)
+  await wait(30)
+  const listedBlock = await call(route, 'list', {})
+  check(`shell script block parks ${command}`, listedBlock.value.changes.length === 1)
+  await call(route, 'decide', { id: listedBlock.value.changes[0].id, action: 'accept' })
+  check(`shell script block accept allows ${command}`, (await parkedBlock).kind === 'allow')
+}
+
+// A compact assignment has no spaces, so it tokenizes as one token; missing it
+// meant the very next `Remove-Item $t` stayed at command level.
+await call(route, 'list', {})
+const parkedCompact = gate(exec('pwsh', { command: "$t='D:/w/a.txt'\nRemove-Item $t -Force" }), next)
+await wait(30)
+const listedCompact = await call(route, 'list', {})
+check('shell compact assignment resolves the path', listedCompact.value.changes.length === 1 && listedCompact.value.changes[0].path === 'D:/w/a.txt')
+await call(route, 'decide', { id: listedCompact.value.changes[0].id, action: 'accept' })
+check('shell compact assignment accept allows', (await parkedCompact).kind === 'allow')
 
 /* ---- shell literal writes ---- */
 // A command that carries its content as a quoted literal is knowable up front, so
