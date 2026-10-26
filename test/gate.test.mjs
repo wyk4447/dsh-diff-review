@@ -19,7 +19,9 @@ function makeCtx({ dir = 'D:/w', absent = false, throwOnGet = false } = {}) {
     connection: { requestRejection: () => undefined },
     fs: {
       resolve: async (p) => ({ targetKey: p, displayPath: p }),
-      stat: async () => ({ version: 'v1', type: 'file' }),
+      // `fresh.txt` does not exist in this fake workspace: that is what makes the
+      // creation path distinguishable from an overwrite.
+      stat: async (target) => (String(target.targetKey).includes('fresh.txt') ? undefined : { version: 'v1', type: 'file' }),
       readText: async () => 'alpha\nbeta\ngamma\ndelta\n',
     },
   }
@@ -146,6 +148,70 @@ check('shell literal dollar name still parks', listedDollar.value.changes.length
 check('shell literal dollar name keeps its path', listedDollar.value.changes[0].path === 'D:/w/a$b.txt')
 await call(route, 'decide', { id: listedDollar.value.changes[0].id, action: 'accept' })
 check('shell literal dollar name accept allows', (await parkedDollar).kind === 'allow')
+
+/* ---- shell literal writes ---- */
+// A command that carries its content as a quoted literal is knowable up front, so
+// the reviewer gets a real diff instead of "the result is not knowable".
+async function parkShell(command) {
+  await call(route, 'list', {})
+  const parked = gate(exec('pwsh', { command }), next)
+  await wait(30)
+  const listed = await call(route, 'list', {})
+  if (listed.value.changes.length !== 1) return { parked, item: undefined, detail: undefined, listed }
+  const item = listed.value.changes[0]
+  const detail = (await call(route, 'detail', { id: item.id })).value
+  return { parked, item, detail, listed }
+}
+
+const overwrite = await parkShell("Set-Content -Path 'D:/w/a.txt' -Value 'one'")
+check('shell literal overwrite parks', overwrite.item !== undefined && overwrite.item.op === 'update')
+check('shell literal overwrite is reviewable', overwrite.item !== undefined && overwrite.item.reviewable === true)
+check('shell literal overwrite has no reason', overwrite.item !== undefined && overwrite.item.reason === undefined)
+check('shell literal overwrite keeps the old text', overwrite.detail.before.includes('alpha'))
+check('shell literal overwrite shows the new text', overwrite.detail.after === 'one')
+check('shell literal overwrite has rows', Array.isArray(overwrite.detail.rows) && overwrite.detail.rows.length > 0)
+await call(route, 'decide', { id: overwrite.item.id, action: 'accept' })
+check('shell literal overwrite accept allows', (await overwrite.parked).kind === 'allow')
+
+// `-Value $x` is produced at run time: the panel must not invent content for it.
+const runtime = await parkShell('Set-Content -Path D:/w/a.txt -Value $x')
+check('shell runtime value parks', runtime.item !== undefined)
+check('shell runtime value is not reviewable', runtime.item !== undefined && runtime.item.reviewable === false)
+check('shell runtime value says shell-command', runtime.item !== undefined && runtime.item.reason === 'shell-command')
+check('shell runtime value has no rows', runtime.detail.rows.length === 0 && runtime.detail.before === '')
+await call(route, 'decide', { id: runtime.item.id, action: 'reject' })
+check('shell runtime value reject denies', (await runtime.parked).kind === 'deny')
+
+// Append semantics: the diff has to keep the existing lines and add the new one.
+const appended = await parkShell("Add-Content -Path 'D:/w/a.txt' -Value 'epsilon'")
+check('shell append is reviewable', appended.item !== undefined && appended.item.reviewable === true)
+check('shell append keeps the old text', appended.detail.after.startsWith('alpha'))
+check('shell append adds the new line', appended.detail.after.trimEnd().endsWith('epsilon'))
+check('shell append shows only an addition', appended.item.added === 1 && appended.item.removed === 0)
+await call(route, 'decide', { id: appended.item.id, action: 'accept' })
+check('shell append accept allows', (await appended.parked).kind === 'allow')
+
+// The same rule applies to redirection, and `2>` carries no content at all.
+const redirect = await parkShell("'redirected' > 'D:/w/a.txt'")
+check('shell literal redirect is reviewable', redirect.item !== undefined && redirect.item.reviewable === true)
+check('shell literal redirect shows the new text', redirect.detail.after === 'redirected')
+await call(route, 'decide', { id: redirect.item.id, action: 'accept' })
+check('shell literal redirect accept allows', (await redirect.parked).kind === 'allow')
+
+const streamed = await parkShell('$js > D:/w/a.txt')
+check('shell runtime redirect says shell-command', streamed.item !== undefined && streamed.item.reason === 'shell-command')
+await call(route, 'decide', { id: streamed.item.id, action: 'accept' })
+check('shell runtime redirect accept allows', (await streamed.parked).kind === 'allow')
+
+// Writing a file that does not exist yet is a creation, and the whole content is
+// new — the badge must not call it an edit of nothing.
+const fresh = await parkShell("Set-Content -Path 'D:/w/fresh.txt' -Value 'brand new'")
+check('shell new file is a create', fresh.item !== undefined && fresh.item.op === 'create')
+check('shell new file is reviewable', fresh.item !== undefined && fresh.item.reviewable === true)
+check('shell new file has no old text', fresh.detail.before === '')
+check('shell new file shows the new text', fresh.detail.after === 'brand new')
+await call(route, 'decide', { id: fresh.item.id, action: 'accept' })
+check('shell new file accept allows', (await fresh.parked).kind === 'allow')
 
 /* ---- self + temp exemptions ---- */
 await call(route, 'list', {})

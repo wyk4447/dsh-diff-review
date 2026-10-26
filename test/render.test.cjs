@@ -257,6 +257,43 @@ async function main() {
   if (left.element.scrollTop !== 300) throw new Error('the other direction stayed locked after the frame')
   console.log('scroll sync: OK')
 
+  // 4) a command-level review: the command is all the panel knows, so it must not
+  // pretend to draw a diff, must not offer a view toggle that does nothing, and
+  // must say why in its own words instead of "too large".
+  React.forcedView = 'unified'
+  listPayload = {
+    ok: true,
+    value: {
+      changes: [
+        // `reason` replaces the old blanket `reviewable === false` wording: this one
+        // is a shell command whose result the shell decides at run time.
+        { id: 'c2', sessionId: 's1', tool: 'pwsh', displayPath: '$dir\\probe.js', op: 'create', added: 0, removed: 0, oldLineCount: 0, newLineCount: 0, truncated: false, reviewable: false, reason: 'shell-command', command: "Out-File -FilePath $dir\\probe.js -InputObject $js" },
+      ],
+      diag: null,
+    },
+  }
+  detailPayload = { ok: true, value: { change: { id: 'c2' }, rows: [], before: '', after: '' } }
+  await poll()
+  out = await render()
+  if (process.env.DUMP) console.log('COMMAND OUT:', out)
+  if (!out.includes('Out-File -FilePath')) throw new Error('command-level review did not show the command')
+  if (out.includes('dshr-code')) throw new Error('command-level review drew an empty code pane')
+  if (out.includes('dshr-stat')) throw new Error('command-level review kept the line statistics')
+  // `t()` resolves through the registered dictionary, so the assertion has to use
+  // the rendered sentence rather than the key that produced it.
+  const wrongForCommand = '改动过大'
+  const rightForCommand = '无法预知最终内容'
+  if (!out.includes(rightForCommand)) throw new Error('command-level review used the wrong wording')
+  if (out.includes(wrongForCommand)) throw new Error('command-level review claimed the change was too large')
+
+  // The same panel must still word a genuinely oversized change as oversized.
+  listPayload.value.changes[0].reason = undefined
+  await poll()
+  out = await render()
+  if (!out.includes(wrongForCommand)) throw new Error('an oversized change lost its own wording')
+  if (out.includes(rightForCommand)) throw new Error('an oversized change claimed to be a command')
+  console.log('command-level review: OK')
+
   console.log('client render smoke: OK')
 }
 

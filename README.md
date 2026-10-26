@@ -9,12 +9,14 @@ DeepSeek Harness 插件：模型**改文件之前**先请你审查，你点「�
 | `write` 新建文件 | 是 | 新增，全文 `+N` |
 | `write` 覆盖文件 | 是 | 统一 diff / 全文双栏 |
 | `edit` 改文件 | 是 | 统一 diff / 全文双栏（标出改动行） |
-| `pwsh` 里的删除/覆盖命令 | 是 | 命令原文 + 被删文件原文 |
+| `pwsh` 里的删除/覆盖命令 | 是 | 命令原文 + 被删文件的原文 / 新文 diff（能确定时） |
 | `read` / `glob` / `grep` 等只读 | 否 | — |
 
 `pwsh` 只识别会破坏文件的命令：`Remove-Item`(`ri`/`rm`/`del`/`erase`/`rd`/`rmdir`)、`Clear-Content`/`clc`、`Set-Content`/`sc`/`Out-File`/`Add-Content`/`ac`，以及 `>` `>>` `2>` 重定向。带 `-WhatIf` 的干跑、以 `|` 结尾的只读管道、`Get-ChildItem` 之类一律放行。
 
-目标路径里含通配符（`*` `?` `[` `]`）或变量展开（`$p`、`$(...)`、`${...}`、`$env:TEMP\x`、`D:\$name\x`）时，闸门无法预知会命中哪些文件，于是**改为确认命令本身**：面板照常弹出、显示完整命令行，只是不假装列出被删的文件。文件名里本来就有的 `$`（如 `a$b.txt`）不算展开，仍然按真实路径审查。
+**能算出新内容时就给完整 diff**：单目标、写入的是引号里的字面文本（如 `Set-Content -Path 'a.txt' -Value 'hello'`、`'hello' > 'a.txt'`），并且目标文件能读——面板就照常显示原文与新文的对照；`Add-Content` / `Out-File -Append` 按追加语义算，新文件按新增算。
+
+**算不出来时只确认命令本身**：目标路径里含通配符（`*` `?` `[` `]`）或变量展开（`$p`、`$(...)`、`${...}`、`$env:TEMP\x`、`D:\$name\x`），或者写入内容是变量/表达式（`-Value $x`、`$js > f`、`Get-Date | Out-File f`）。这时面板照常弹出、显示完整命令行，并明说「命令操作，无法预知最终内容」——不会假装列出被删的文件，也不会把这种情况说成「改动过大」。文件名里本来就有的 `$`（如 `a$b.txt`）不算展开，仍然按真实路径审查。
 
 **不拦的**：只读工具；系统临时目录（`%TEMP%` / `%TMP%` / `/tmp`）；工作区下的 `.dsh/tmp/`（一次性脚本、导出、截图的默认落点）；插件自己的源码。除这几类以外，只要落盘就一定会先问你。
 
@@ -42,6 +44,7 @@ DeepSeek Harness 插件：模型**改文件之前**先请你审查，你点「�
 | 临时目录下的文件 | 直接放行 | `skipTemp` |
 | 工作区 `.dsh/tmp/` 下的文件 | 直接放行 | `skipScratch`，一次性脚本的默认落点 |
 | 二进制 / 超大文件 | 降级为仅统计 | 读不出 UTF-8 时不假装能 diff |
+| 命令写入的内容由 shell 决定 | 降级为仅确认命令 | 面板显示命令行，并说明原因 |
 
 ## 安装
 
@@ -111,9 +114,9 @@ node test\render.test.cjs   # 面板：空态诊断、改动视图、全文视�
 
 > 别用 `node --run test` / `npm test`：Windows 上 Node 在含非 ASCII 字符的路径下会把它算成乱码路径而报「Can't find package.json」。`package.json` 里仍留了 `scripts.test`，放在纯 ASCII 路径下可用。
 
-闸门测试用 mock 的 `ctx` 直接驱动真实的 `apply(ctx)`，覆盖 42 项断言：`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`-WhatIf`/`Get-ChildItem`/`Write-Host` 放行、通配与变量目标的命令级确认（`$p`/`$env:TEMP\x`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、自我豁免、临时目录豁免、工作区 `.dsh/tmp` 豁免且不误豁免 `.dsh/tmpfoo`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起。
+闸门测试用 mock 的 `ctx` 直接驱动真实的 `apply(ctx)`，覆盖 69 项断言：`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建文件四种）、写入内容是变量时降级为命令级、`-WhatIf`/`Get-ChildItem`/`Write-Host` 放行、通配与变量目标的命令级确认（`$p`/`$env:TEMP\x`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、自我豁免、临时目录豁免、工作区 `.dsh/tmp` 豁免且不误豁免 `.dsh/tmpfoo`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起。
 
-面板测试用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch：验证空态五行诊断、改动视图有 `+`/`-` 标记、改写行只有真正变化的那几个字被加深高亮（前缀不被误涂）、全文视图有双栏与 gutter 竖条、**拖动一侧另一侧同步且不回弹**、删除态第二栏显示「文件将被删除」。
+面板测试用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch：验证空态五行诊断、改动视图有 `+`/`-` 标记、改写行只有真正变化的那几个字被加深高亮（前缀不被误涂）、全文视图有双栏与 gutter 竖条、**拖动一侧另一侧同步且不回弹**、删除态第二栏显示「文件将被删除」、命令级审查不出空代码区且用「无法预知最终内容」而不是「改动过大」。
 
 ## 排错
 
