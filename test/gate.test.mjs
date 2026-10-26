@@ -297,6 +297,60 @@ check('shell variable path is a delete', pathVariable.item !== undefined && path
 await call(route, 'decide', { id: pathVariable.item.id, action: 'accept' })
 check('shell variable path accept allows', (await pathVariable.parked).kind === 'allow')
 
+// A here-string is how every multi-line payload is actually written. Its body
+// spans newlines and freely contains `|`, `&`, braces and quotes — a markdown
+// table alone is enough to tear a line-based splitter apart.
+const hereLiteral = await parkShell([
+  "$p = 'D:/w/a.txt'",
+  "$add = @'",
+  'line one',
+  'line two',
+  "'@",
+  '[System.IO.File]::WriteAllText($p, $add)',
+].join('\n'))
+check('shell here-string literal is reviewable', hereLiteral.item !== undefined && hereLiteral.item.reviewable === true)
+check('shell here-string literal has both lines', hereLiteral.detail.after === 'line one\nline two')
+await call(route, 'decide', { id: hereLiteral.item.id, action: 'accept' })
+check('shell here-string literal accept allows', (await hereLiteral.parked).kind === 'allow')
+
+// A markdown table inside the body: pipes and a `---` rule, which the statement
+// splitter would otherwise treat as command boundaries.
+const hereTable = await parkShell([
+  "$c = @'",
+  '| a | b |',
+  '| - | - |',
+  "'@",
+  "Set-Content -Path 'D:/w/a.txt' -Value $c",
+].join('\n'))
+check('shell here-string table is reviewable', hereTable.item !== undefined && hereTable.item.reviewable === true)
+check('shell here-string table keeps the pipes', hereTable.detail.after === '| a | b |\n| - | - |')
+await call(route, 'decide', { id: hereTable.item.id, action: 'accept' })
+check('shell here-string table accept allows', (await hereTable.parked).kind === 'allow')
+
+// An expanding here-string follows the same rule as `"..."`: knowable only when
+// every reference was assigned a literal earlier in the same command.
+const hereKnown = await parkShell([
+  "$v = 'hello'",
+  '$add = @"',
+  'line $v',
+  '"@',
+  "[System.IO.File]::WriteAllText('D:/w/a.txt', $add)",
+].join('\n'))
+check('shell here-string interpolates a known value', hereKnown.detail !== undefined && hereKnown.detail.after === 'line hello')
+await call(route, 'decide', { id: hereKnown.item.id, action: 'accept' })
+check('shell here-string known accept allows', (await hereKnown.parked).kind === 'allow')
+
+const hereUnknown = await parkShell([
+  '$n = Get-Date',
+  '$add = @"',
+  'line $n',
+  '"@',
+  "[System.IO.File]::WriteAllText('D:/w/a.txt', $add)",
+].join('\n'))
+check('shell here-string unknown value says shell-command', hereUnknown.item !== undefined && hereUnknown.item.reason === 'shell-command')
+await call(route, 'decide', { id: hereUnknown.item.id, action: 'accept' })
+check('shell here-string unknown accept allows', (await hereUnknown.parked).kind === 'allow')
+
 // The exemption stays narrow: a variable assigned at run time is not knowable.
 const builtAtRuntime = await parkShell("$t = 'a' + 'b'\nSet-Content -Path D:/w/a.txt -Value $t")
 check('shell computed value says shell-command', builtAtRuntime.item !== undefined && builtAtRuntime.item.reason === 'shell-command')
