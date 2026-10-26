@@ -14,16 +14,19 @@ DeepSeek Harness 插件：模型**改文件之前**先请你审查，你点「�
 
 `pwsh` 只识别会破坏文件的命令：`Remove-Item`(`ri`/`rm`/`del`/`erase`/`rd`/`rmdir`)、`Clear-Content`/`clc`、`Set-Content`/`sc`/`Out-File`/`Add-Content`/`ac`，以及 `>` `>>` `2>` 重定向。带 `-WhatIf` 的干跑、以 `|` 结尾的只读管道、`Get-ChildItem` 之类一律放行。
 
+**不拦的**：只读工具；系统临时目录（`%TEMP%` / `%TMP%` / `/tmp`）；工作区下的 `.dsh/tmp/`（一次性脚本、导出、截图的默认落点）；插件自己的源码。除这几类以外，只要落盘就一定会先问你。
+
 ## 侧边栏
 
 右侧栏新增「改动审查」标签页：
 
-- 顶部：操作徽章（新增/修改/删除）+ 完整路径 + `+N -N` + 视图切换 + 拒绝 + 接受
+- 顶部：操作徽章（新增/修改/删除）+ 文件名与所在目录分两行显示（像编辑器的标签页）+ `+N -N` + 视图切换 + 拒绝 + 接受
 - 两种视图：
   - **改动视图**：统一 diff，左右两列行号，`+`/`-` 标记，未改动处折叠成「⋯ 未改动的 N 行」
   - **全文视图**：原文 / 新文左右并排，行号跟文件真实行号走，改动行在行号旁画彩色竖条（编辑器 gutter 那种效果）
-- 多个待审查项横排在左侧列表，逐条接受或拒绝
-- 没有待审查项时显示空态
+- 多个待审查项在左侧列表里纵向排列，逐条接受或拒绝
+- 代码区 13px/20px、等宽栈优先 Cascadia Code / Consolas，关闭连字；正文用系统无衬线，中文走雅黑
+- 没有待审查项时显示空态，并把闸门的自检信息收进一张卡片里
 
 ## 安全阀
 
@@ -34,6 +37,7 @@ DeepSeek Harness 插件：模型**改文件之前**先请你审查，你点「�
 | 5 分钟没人理 | 放行 | 同上，未答复不等于拒绝 |
 | 插件自己的源码 | 直接放行 | 否则插件坏了就再也修不了（自锁） |
 | 临时目录下的文件 | 直接放行 | `skipTemp` |
+| 工作区 `.dsh/tmp/` 下的文件 | 直接放行 | `skipScratch`，一次性脚本的默认落点 |
 | 二进制 / 超大文件 | 降级为仅统计 | 读不出 UTF-8 时不假装能 diff |
 
 ## 安装
@@ -73,7 +77,8 @@ dsh plugin add github:<你的用户名>/dsh-diff-review
   config:
     files: true          # 拦 write/edit
     shell: true          # 拦 pwsh 里的破坏性命令
-    skipTemp: true       # 跳过临时目录
+    skipTemp: true       # 跳过系统临时目录
+    skipScratch: true    # 跳过工作区 .dsh/tmp
     skipSelf: true       # 跳过插件自身（强烈建议保持 true）
     trace: true          # 写诊断日志到 ~/.dsh/logs/diff-review.log
     timeoutMs: 300000    # 文件审查超时（毫秒）
@@ -101,7 +106,7 @@ node test\render.test.cjs   # 面板：空态诊断、改动视图、全文视�
 
 > 别用 `node --run test` / `npm test`：Windows 上 Node 在含非 ASCII 字符的路径下会把它算成乱码路径而报「Can't find package.json」。`package.json` 里仍留了 `scripts.test`，放在纯 ASCII 路径下可用。
 
-闸门测试用 mock 的 `ctx` 直接驱动真实的 `apply(ctx)`，覆盖 25 项断言：`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`-WhatIf`/`Get-ChildItem`/`Write-Host` 放行、自我豁免、临时目录豁免、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起。
+闸门测试用 mock 的 `ctx` 直接驱动真实的 `apply(ctx)`，覆盖 31 项断言：`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`-WhatIf`/`Get-ChildItem`/`Write-Host` 放行、自我豁免、临时目录豁免、工作区 `.dsh/tmp` 豁免且不误豁免 `.dsh/tmpfoo`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起。
 
 面板测试用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch：验证空态五行诊断、改动视图有 `+`/`-` 标记、全文视图有双栏与 gutter 竖条、删除态第二栏显示「文件将被删除」。
 
@@ -142,7 +147,7 @@ Select-String -Path ~\.dsh\logs\diff-review.log -Pattern '"tool":"write"'
 | `not-armed` | 侧边栏没在轮询（Tab 没开 / bundle 没加载），属正常放行 |
 | `not-gated` | 工具不在拦截范围（如 `read`） |
 | `no-session` | 拿不到会话工作目录 |
-| `temp-skipped` / `self-skipped` | 命中临时目录 / 插件自身豁免 |
+| `temp-skipped` / `scratch-skipped` / `self-skipped` | 命中系统临时目录 / 工作区 `.dsh/tmp` / 插件自身豁免 |
 | `identical` / `edit-no-match` / `edit-ambiguous` | 改动本身无效或歧义，交给宿主自己报错 |
 | `shell-not-destructive` | `pwsh` 命令不含破坏性操作 |
 

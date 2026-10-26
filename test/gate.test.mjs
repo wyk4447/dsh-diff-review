@@ -125,6 +125,21 @@ const selfFile = fileURLToPath(new URL('../lib/x.js', import.meta.url))
 check('self skipped', (await gate(exec('write', { file_path: selfFile, content: 'x\n' }), next)).kind === 'allow')
 const tempProbe = `${(process.env.TEMP || 'C:/Temp').replace(/\\\\/g, '/')}/probe.txt`
 check('temp skipped', (await gate(exec('write', { file_path: tempProbe, content: 'x\n' }), next)).kind === 'allow')
+// `skipScratch` covers the workspace scratch directory, which lives under no
+// environment variable: the harness puts every throwaway file in `<ws>/.dsh/tmp`.
+for (const scratch of ['D:/w/.dsh/tmp/probe.cjs', 'D:/w/.dsh/tmp/deep/nest/probe.mjs', 'D:/other/.dsh/tmp/x.html']) {
+  check(`scratch skipped ${scratch}`, (await gate(exec('write', { file_path: scratch, content: 'x\n' }), next)).kind === 'allow')
+}
+// The exemption must stay narrow: a directory that merely starts with the word
+// tmp, or a .dsh file outside tmp, is a real project file and still parks.
+for (const keeper of ['D:/w/.dsh/tmpfoo/probe.cjs', 'D:/w/.dsh/settings.json', 'D:/w/src/tmp/app.js']) {
+  const parked = gate(exec('write', { file_path: keeper, content: 'x\n' }), next)
+  await wait(20)
+  const listed = await call(route, 'list', {})
+  check(`scratch guard keeps ${keeper}`, listed.value.changes.some((item) => item.path === keeper))
+  await call(route, 'decide', { id: listed.value.changes[0].id, action: 'reject' })
+  await parked
+}
 
 /* ---- directory fallbacks ---- */
 const fallback = makeCtx({ dir: 'D:/fallback' })
