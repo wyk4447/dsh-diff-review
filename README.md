@@ -12,12 +12,20 @@ DeepSeek Harness 插件：模型**改文件之前**先请你审查，你点「�
 | `pwsh` 里的删除/覆盖命令 | 是 | 命令原文 + 被删文件的原文 / 新文 diff（能确定时） |
 | `read` / `glob` / `grep` 等只读 | 否 | — |
 
-`pwsh` 只识别会破坏文件的命令：`Remove-Item`(`ri`/`rm`/`del`/`erase`/`rd`/`rmdir`)、`Clear-Content`/`clc`、`Set-Content`/`sc`/`Out-File`/`Add-Content`/`ac`，以及 `>` `>>` `2>` 重定向。带 `-WhatIf` 的干跑、以 `|` 结尾的只读管道、`Get-ChildItem` 之类一律放行。脚本块里的命令同样算数：`if (Test-Path $t) { Remove-Item $t -Force }`、`foreach (...) { ... }`、`& { ... }` 都会照常拦下，藏在里面的删除不会漏。
+`pwsh` 不靠「记住有哪些命令」，而是按**形状**识别：只要这条命令可能改写文件，就先请你确认。判断依据是四类形状：
+
+- **PowerShell 动词-名词约定**：`Set-` / `New-` / `Remove-` / `Clear-` / `Rename-` / `Move-` / `Copy-` / `Add-` / `Out-` / `Tee-` / `Write-` / `Save-` / `Export-` / `Import-` / `Compress-` / `Expand-` / `Restore-` 等前缀（所以 `Set-Item`、`New-Item`、`Tee-Object`、`Export-Csv`、`Rename-Item` 这些没被逐个列出的命令同样会拦）；只操作内存的 `New-Object`、`Add-Type`、`Set-Variable`、`Clear-Host` 之类显式放行；
+- **.NET 成员调用**：`[System.IO.File]::Delete(...)`、`[IO.File]::WriteAllText(...)`、`[System.IO.Directory]::Delete(...)`；
+- **把代码当字符串交给别的程序**：`cmd /c del`、`iex` / `Invoke-Expression`、`powershell -EncodedCommand`、`node -e`、`python -c`、`bash -c` 等；
+- **原地改文件的外部工具**：`git clean` / `git checkout -- ` / `git reset` / `git stash`、`truncate`、`dd`、`shred`、`unlink`。
+
+外加常见别名（`ri`/`rm`/`del`/`erase`/`rd`/`rmdir`/`clc`/`cli`/`ren`/`rni`/`mi`/`mv`/`sc`/`ac`/`cpi`/`cp`/`tee`/`ni`/`si`/`sp`/`mkdir`/`md`）与 `>` `>>` `2>` 重定向。带 `-WhatIf` 的干跑、只读管道、`Get-ChildItem` / `Get-Content` / `Select-String` / `git status` / `git log` / `git diff` 之类一律放行。脚本块里的命令同样算数：`if (Test-Path $t) { Remove-Item $t -Force }`、`foreach (...) { ... }`、`& { ... }` 都会照常拦下，藏在里面的删除不会漏；管道右端没有目标的（`Get-ChildItem 'D:/w' | Remove-Item -Force`）按「确认命令本身」处理。
 
 **能算出新内容时就给完整 diff**：写入的是命令里就写死的文本，并且目标文件能读——面板就照常显示原文与新文的对照；`Add-Content` / `Out-File -Append` 按追加语义算，新文件按新增算。所谓「写死」包括三种：
 
 - 引号里的字面文本：`Set-Content -Path 'a.txt' -Value 'hello'`、`'hello' > 'a.txt'`；
 - 同一命令里先赋值、再写出去的变量：`$t = 'hello'; Set-Content -Path a.txt -Value $t`——插件按出现顺序跟踪赋值，写出去的内容就是那个字面值；
+- .NET 调用的前两个实参：`[System.IO.File]::WriteAllText('a.txt', 'hello')`——路径和内容都是字面量时同样出真 diff，`[System.IO.File]::Delete('a.txt')` 出被删的原文；
 - `$` 引号字符串里的插值，只要引用的变量同样能确定：`` $dir = 'D:\w'; $js = "line one`nline two"; Out-File "$dir/probe.js" -InputObject $js `` 会解析成真实路径 `D:\w\probe.js` 与真实的三行文本（反引号转义如 `` `n `` `` `t `` 一并还原）。
 
 **算不出来时只确认命令本身**：路径或内容只能由 shell 在运行时决定——通配符（`*` `?` `[` `]`）、没被赋过值的变量（`$env:TEMP\x`、`$(...)`、`${...}`）、运行期才算出来的值（`$t = 'a' + 'b'`、`Get-Date | Out-File f`）、属性或索引访问（`$a.Length`）。这时面板照常弹出、显示完整命令行，并明说「命令操作，无法预知最终内容」——不会假装列出被删的文件，也不会把这种情况说成「改动过大」。文件名里本来就有的 `$`（如 `a$b.txt`）不算展开，仍然按真实路径审查。
@@ -120,7 +128,7 @@ node test\render.test.cjs   # 面板：空态诊断、改动视图、全文视�
 
 > 别用 `node --run test` / `npm test`：Windows 上 Node 在含非 ASCII 字符的路径下会把它算成乱码路径而报「Can't find package.json」。`package.json` 里仍留了 `scripts.test`，放在纯 ASCII 路径下可用。
 
-闸门测试用 mock 的 `ctx` 直接驱动真实的 `apply(ctx)`，覆盖 108 项断言：`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建文件四种）、同一命令里赋值后写出的变量（`$t = 'one'; Set-Content -Value $t`、反引号转义还原、`$p = 'D:/w/a.txt'; Remove-Item $p` 解析成真实文件、`$dir` 参与路径拼接、`"hello $n"` 插值）、运行期才算出来的值降级为命令级（`$t = 'a' + 'b'`、`$env:USERNAME`）、`-WhatIf`/`Get-ChildItem`/`Write-Host` 放行、通配与变量目标的命令级确认（`$p`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、脚本块里的删除（`if (...) { ... }`、`foreach (...) { ... }`、`& { ... }`）、同一命令内赋值参与路径解析、逗号并列多个目标、`$env:TEMP` 目标按临时目录放行、自我豁免、临时目录豁免、工作区 `.dsh/tmp` 豁免且不误豁免 `.dsh/tmpfoo`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起。
+闸门测试用 mock 的 `ctx` 直接驱动真实的 `apply(ctx)`，覆盖 168 项断言：`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建文件四种）、同一命令里赋值后写出的变量（`$t = 'one'; Set-Content -Value $t`、反引号转义还原、`$p = 'D:/w/a.txt'; Remove-Item $p` 解析成真实文件、`$dir` 参与路径拼接、`"hello $n"` 插值）、运行期才算出来的值降级为命令级（`$t = 'a' + 'b'`、`$env:USERNAME`）、按形状识别的十六种改写命令（`Set-Item`/`Rename-Item`/`New-Item`/`Tee-Object`/`Export-Csv`/`[IO.File]::Delete`/`cmd /c del`/`iex`/`Invoke-Expression`/`node -e`/`python -c`/`powershell -EncodedCommand`/`git clean`/`git checkout --`/管道右端无目标）且参数是字面量时仍出真 diff、`-WhatIf`/`Get-ChildItem`/`Write-Host`/`New-Object`/`Add-Type`/`Clear-Host`/`git status`/`node --version` 放行、通配与变量目标的命令级确认（`$p`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、脚本块里的删除（`if (...) { ... }`、`foreach (...) { ... }`、`& { ... }`）、同一命令内赋值参与路径解析、逗号并列多个目标、`$env:TEMP` 目标按临时目录放行、自我豁免、临时目录豁免、工作区 `.dsh/tmp` 豁免且不误豁免 `.dsh/tmpfoo`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起。
 
 面板测试用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch：验证空态五行诊断、改动视图有 `+`/`-` 标记、改写行只有真正变化的那几个字被加深高亮（前缀不被误涂）、全文视图有双栏与 gutter 竖条、**拖动一侧另一侧同步且不回弹**、删除态第二栏显示「文件将被删除」、命令级审查不出空代码区且用「无法预知最终内容」而不是「改动过大」。
 

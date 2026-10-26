@@ -332,6 +332,99 @@ check('shell unknown reference says shell-command', unknownRef.item !== undefine
 await call(route, 'decide', { id: unknownRef.item.id, action: 'accept' })
 check('shell unknown reference accept allows', (await unknownRef.parked).kind === 'allow')
 
+/* ---- shell shape recognition ---- */
+// A cmdlet inventory can never be complete, so the net keys off shape instead:
+// PowerShell's verb-noun convention, .NET member calls, programs that take code
+// as a string, and tools that rewrite files in place. Each of these rewrote a
+// file while matching nothing the old whitelist knew.
+for (const command of [
+  "Set-Item -Path 'D:/w/a.txt' -Value 'one'",
+  "Rename-Item -Path 'D:/w/a.txt' -NewName 'b.txt'",
+  "New-Item -Path 'D:/w/dir' -ItemType Directory",
+  "'x' | Tee-Object -FilePath 'D:/w/a.txt'",
+  "Get-Process | Export-Csv -Path 'D:/w/a.csv'",
+  "[System.IO.File]::Delete('D:/w/a.txt')",
+  "[System.IO.Directory]::Delete('D:/w/dir')",
+  "cmd /c del D:/w/a.txt",
+  "iex $code",
+  "Invoke-Expression 'Remove-Item D:/w/a.txt'",
+  'node -e "require(`fs`).writeFileSync(`D:/w/a.txt`, `x`)"',
+  'python -c "open(`D:/w/a.txt`, `w`).write(`x`)"',
+  'powershell -EncodedCommand ZQBjAGgAbwA=',
+  'git clean -fdx',
+  'git checkout -- .',
+  "Get-ChildItem 'D:/w' | Remove-Item -Force",
+]) {
+  const parked = await parkShell(command)
+  check(`shell shape parks ${command}`, parked.item !== undefined)
+  await call(route, 'decide', { id: parked.item.id, action: 'accept' })
+  check(`shell shape accept allows ${command}`, (await parked.parked).kind === 'allow')
+}
+
+// Whether the panel can show a diff depends on the payload, not on the shape: the
+// same recognition has to fall back to the command block when the payload is a
+// string handed to another program, and produce rows when it is a literal.
+for (const command of [
+  "cmd /c del D:/w/a.txt",
+  'iex $code',
+  'powershell -EncodedCommand ZQBjAGgAbwA=',
+  'git clean -fdx',
+  "Get-ChildItem 'D:/w' | Remove-Item -Force",
+  "[System.IO.File]::Delete($path)",
+]) {
+  const parked = await parkShell(command)
+  check(
+    `shell shape confirms the command ${command}`,
+    parked.item !== undefined && parked.item.reason === 'shell-command' && parked.detail.rows.length === 0,
+  )
+  await call(route, 'decide', { id: parked.item.id, action: 'accept' })
+  await parked.parked
+}
+
+// A .NET call whose arguments are literals is still knowable, so it gets a diff
+// rather than the command block. The first argument is a positional path.
+const dotnetLiteral = await parkShell("[System.IO.File]::WriteAllText('D:/w/a.txt', 'body')")
+check('shell dotnet literal parks', dotnetLiteral.item !== undefined)
+check('shell dotnet literal is reviewable', dotnetLiteral.item !== undefined && dotnetLiteral.item.reviewable === true)
+check('shell dotnet literal shows the new text', dotnetLiteral.detail.after === 'body')
+await call(route, 'decide', { id: dotnetLiteral.item.id, action: 'accept' })
+check('shell dotnet literal accept allows', (await dotnetLiteral.parked).kind === 'allow')
+
+// A `.NET` delete of a file that exists knows exactly what disappears.
+const dotnetDelete = await parkShell("[System.IO.File]::Delete('D:/w/a.txt')")
+check('shell dotnet delete is a delete', dotnetDelete.item !== undefined && dotnetDelete.item.op === 'delete')
+check('shell dotnet delete shows the old text', dotnetDelete.detail.before.includes('alpha'))
+await call(route, 'decide', { id: dotnetDelete.item.id, action: 'accept' })
+check('shell dotnet delete accept allows', (await dotnetDelete.parked).kind === 'allow')
+
+// `Set-Item` is a known write cmdlet with a literal path and value, so the same
+// diff machinery applies rather than a bare command block.
+const setItem = await parkShell("Set-Item -Path 'D:/w/a.txt' -Value 'one'")
+check('shell set-item is reviewable', setItem.item !== undefined && setItem.item.reviewable === true)
+check('shell set-item shows the new text', setItem.detail.after === 'one')
+await call(route, 'decide', { id: setItem.item.id, action: 'accept' })
+check('shell set-item accept allows', (await setItem.parked).kind === 'allow')
+
+// The wider net must not swallow read-only commands or cmdlets that only build
+// objects in memory: `New-Object`, `Add-Type`, `Clear-Host` and friends share a
+// mutating prefix but never touch a file.
+for (const harmless of [
+  'Get-ChildItem D:/w',
+  "Select-String 'x' D:/w/a.txt",
+  'git status',
+  'git log --oneline -3',
+  'git diff',
+  'dotnet --version',
+  'node --version',
+  'New-Object System.Text.StringBuilder',
+  'Add-Type -AssemblyName System.Windows.Forms',
+  'Set-Variable x 1',
+  'Clear-Host',
+  'Write-Output hi',
+]) {
+  check(`shell shape bypass ${harmless}`, (await gate(exec('pwsh', { command: harmless }), next)).kind === 'allow')
+}
+
 /* ---- self + temp exemptions ---- */
 await call(route, 'list', {})
 // Derived from this file's own location so the test survives a clone anywhere.
