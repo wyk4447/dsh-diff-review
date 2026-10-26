@@ -213,6 +213,73 @@ check('shell new file shows the new text', fresh.detail.after === 'brand new')
 await call(route, 'decide', { id: fresh.item.id, action: 'accept' })
 check('shell new file accept allows', (await fresh.parked).kind === 'allow')
 
+/* ---- shell literal writes through a variable ---- */
+// Real commands build the payload first and hand over a variable, so a variable
+// that was assigned a literal in the same command is still knowable. Without
+// this, the ordinary `$t = '...'; Set-Content -Value $t` shape showed no diff.
+const viaVariable = await parkShell("$t = 'one'\nSet-Content -Path D:/w/a.txt -Value $t")
+check('shell variable write parks', viaVariable.item !== undefined && viaVariable.item.op === 'update')
+check('shell variable write is reviewable', viaVariable.item !== undefined && viaVariable.item.reviewable === true)
+check('shell variable write has no reason', viaVariable.item !== undefined && viaVariable.item.reason === undefined)
+check('shell variable write keeps the old text', viaVariable.detail.before.includes('alpha'))
+check('shell variable write shows the new text', viaVariable.detail.after === 'one')
+await call(route, 'decide', { id: viaVariable.item.id, action: 'accept' })
+check('shell variable write accept allows', (await viaVariable.parked).kind === 'allow')
+
+// Backtick escapes decide the bytes, so they have to be resolved: `` `n `` is a
+// newline, not the letter n. This is the shape that produced the reported "no
+// diff" panel.
+const escaped = await parkShell('$c = "first`nsecond`n"\nSet-Content -Path D:/w/a.txt -Value $c')
+check('shell escaped write is reviewable', escaped.item !== undefined && escaped.item.reviewable === true)
+check('shell escaped write has two lines', escaped.detail.after === 'first\nsecond\n')
+check('shell escaped write adds both lines', escaped.item.added === 2)
+await call(route, 'decide', { id: escaped.item.id, action: 'accept' })
+check('shell escaped write accept allows', (await escaped.parked).kind === 'allow')
+
+// A variable holding a path is the same idea: `$p = '...'; Remove-Item $p` names
+// a real file, so it must be reviewed as that file, not as the text `$p`.
+const pathVariable = await parkShell("$p = 'D:/w/a.txt'\nRemove-Item -LiteralPath $p")
+check('shell variable path parks', pathVariable.item !== undefined)
+check('shell variable path resolves the file', pathVariable.item !== undefined && pathVariable.item.path === 'D:/w/a.txt')
+check('shell variable path is a delete', pathVariable.item !== undefined && pathVariable.item.op === 'delete')
+await call(route, 'decide', { id: pathVariable.item.id, action: 'accept' })
+check('shell variable path accept allows', (await pathVariable.parked).kind === 'allow')
+
+// The exemption stays narrow: a variable assigned at run time is not knowable.
+const builtAtRuntime = await parkShell("$t = 'a' + 'b'\nSet-Content -Path D:/w/a.txt -Value $t")
+check('shell computed value says shell-command', builtAtRuntime.item !== undefined && builtAtRuntime.item.reason === 'shell-command')
+check('shell computed value has no rows', builtAtRuntime.detail.rows.length === 0)
+await call(route, 'decide', { id: builtAtRuntime.item.id, action: 'accept' })
+check('shell computed value accept allows', (await builtAtRuntime.parked).kind === 'allow')
+
+// Interpolation of a variable the same command assigned is still exact text, so
+// `"hello $n"` is reviewable. Only an unknown reference falls back.
+const interpolated = await parkShell("$n = 'x'\nSet-Content -Path D:/w/a.txt -Value \"hello $n\"")
+check('shell interpolated value is reviewable', interpolated.item !== undefined && interpolated.item.reviewable === true)
+check('shell interpolated value resolves the text', interpolated.detail.after === 'hello x')
+await call(route, 'decide', { id: interpolated.item.id, action: 'accept' })
+check('shell interpolated value accept allows', (await interpolated.parked).kind === 'allow')
+
+// The exact shape that was reported as "no diff at all": a script builds its
+// payload and its output path in variables, then writes through Out-File. Both
+// variables are literals, so the whole thing is knowable.
+const scripted = await parkShell([
+  "$dir = 'D:/w'",
+  '$js = "line one`nline two`n"',
+  'Out-File -FilePath "$dir/probe.js" -InputObject $js',
+].join('\n'))
+check('shell scripted write parks', scripted.item !== undefined)
+check('shell scripted write resolves the path', scripted.item !== undefined && scripted.item.path === 'D:/w/probe.js')
+check('shell scripted write is reviewable', scripted.item !== undefined && scripted.item.reviewable === true)
+check('shell scripted write has the new text', scripted.detail.after === 'line one\nline two\n')
+check('shell scripted write counts both lines', scripted.item.added === 2)
+await call(route, 'decide', { id: scripted.item.id, action: 'accept' })
+check('shell scripted write accept allows', (await scripted.parked).kind === 'allow')
+const unknownRef = await parkShell('Set-Content -Path D:/w/a.txt -Value "hello $env:USERNAME"')
+check('shell unknown reference says shell-command', unknownRef.item !== undefined && unknownRef.item.reason === 'shell-command')
+await call(route, 'decide', { id: unknownRef.item.id, action: 'accept' })
+check('shell unknown reference accept allows', (await unknownRef.parked).kind === 'allow')
+
 /* ---- self + temp exemptions ---- */
 await call(route, 'list', {})
 // Derived from this file's own location so the test survives a clone anywhere.
