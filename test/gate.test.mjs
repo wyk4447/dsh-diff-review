@@ -164,6 +164,28 @@ check(
 await call(route, 'decide', { id: listedList.value.changes[0].id, action: 'accept' })
 check('shell comma list accept allows', (await parkedList).kind === 'allow')
 
+// The same file written twice in one command used to appear twice in the header
+// (`D:/w/a.txt, D:/w/a.txt`), which reads like two files. Seeding a file with a
+// .NET call and then rewriting it with a cmdlet is an ordinary thing to do.
+const twiceSame = await parkShell([
+  "[System.IO.File]::WriteAllText('D:/w/a.txt', 'seed')",
+  "Set-Content -Path 'D:/w/a.txt' -Value 'body'",
+].join('\n'))
+check('shell duplicate target still parks', twiceSame.item !== undefined)
+check('shell duplicate target keeps both ops', twiceSame.item !== undefined && twiceSame.item.targets.length === 2)
+check('shell duplicate target names the file once', twiceSame.item !== undefined && twiceSame.item.displayPath === 'D:/w/a.txt')
+await call(route, 'decide', { id: twiceSame.item.id, action: 'accept' })
+check('shell duplicate target accept allows', (await twiceSame.parked).kind === 'allow')
+
+// Two different files must still both be named, in the order the command wrote them.
+const twoFiles = await parkShell([
+  "[System.IO.File]::WriteAllText('D:/w/a.txt', 'seed')",
+  "Set-Content -Path 'D:/w/b.txt' -Value 'body'",
+].join('\n'))
+check('shell two files names both', twoFiles.item !== undefined && twoFiles.item.displayPath === 'D:/w/a.txt, D:/w/b.txt')
+await call(route, 'decide', { id: twoFiles.item.id, action: 'accept' })
+check('shell two files accept allows', (await twoFiles.parked).kind === 'allow')
+
 // The exemption has to stay narrow: a literal `$` in a file name is a real path.
 await call(route, 'list', {})
 const parkedDollar = gate(exec('pwsh', { command: "Remove-Item -LiteralPath 'D:/w/a$b.txt'" }), next)
