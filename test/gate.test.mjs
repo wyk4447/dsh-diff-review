@@ -126,7 +126,6 @@ for (const harmless of ["Remove-Item 'D:/w/a.txt' -WhatIf", 'Get-ChildItem D:/w'
 const expanded = [
   'Remove-Item -LiteralPath $p -Force',
   'Remove-Item -LiteralPath "${target}"',
-  'Set-Content -Path $out -Value hi',
 ]
 for (const command of expanded) {
   await call(route, 'list', {})
@@ -137,6 +136,15 @@ for (const command of expanded) {
   await call(route, 'decide', { id: listedExpanded.value.changes[0].id, action: 'reject' })
   check(`shell expanded target reject denies ${command}`, (await parkedExpanded).kind === 'deny')
 }
+
+// A write whose content the shell decides is not worth interrupting for: the
+// reviewer cannot judge what they cannot see, so only *deletes* stay gated in
+// that case. Parking every `Set-Content -Value $out` was pure noise.
+await call(route, 'list', {})
+const parkedUnknownWrite = gate(exec('pwsh', { command: 'Set-Content -Path $out -Value hi' }), next)
+check('shell unknown write is not parked', (await parkedUnknownWrite).kind === 'allow')
+const listedUnknownWrite = await call(route, 'list', {})
+check('shell unknown write leaves nothing pending', listedUnknownWrite.value.changes.length === 0)
 
 // `$env:TEMP` is the one expansion the host can replay, and replaying it turns a
 // throwaway scratch delete into a path `isTempPath` recognises — so it must be
@@ -247,14 +255,15 @@ check('shell literal overwrite has rows', Array.isArray(overwrite.detail.rows) &
 await call(route, 'decide', { id: overwrite.item.id, action: 'accept' })
 check('shell literal overwrite accept allows', (await overwrite.parked).kind === 'allow')
 
-// `-Value $x` is produced at run time: the panel must not invent content for it.
-const runtime = await parkShell('Set-Content -Path D:/w/a.txt -Value $x')
-check('shell runtime value parks', runtime.item !== undefined)
-check('shell runtime value is not reviewable', runtime.item !== undefined && runtime.item.reviewable === false)
-check('shell runtime value says shell-command', runtime.item !== undefined && runtime.item.reason === 'shell-command')
-check('shell runtime value has no rows', runtime.detail.rows.length === 0 && runtime.detail.before === '')
-await call(route, 'decide', { id: runtime.item.id, action: 'reject' })
-check('shell runtime value reject denies', (await runtime.parked).kind === 'deny')
+// `-Value $x` is produced at run time. A *write* whose content nobody can see is
+// not worth interrupting for — the reviewer cannot judge it — so it goes straight
+// through. Only a delete stays gated when its content is unknowable, because that
+// cannot be undone.
+await call(route, 'list', {})
+const runtime = gate(exec('pwsh', { command: 'Set-Content -Path D:/w/a.txt -Value $x' }), next)
+check('shell runtime write is not parked', (await runtime).kind === 'allow')
+const listedRuntime = await call(route, 'list', {})
+check('shell runtime write leaves nothing pending', listedRuntime.value.changes.length === 0)
 
 // Append semantics: the diff has to keep the existing lines and add the new one.
 const appended = await parkShell("Add-Content -Path 'D:/w/a.txt' -Value 'epsilon'")
@@ -272,10 +281,13 @@ check('shell literal redirect shows the new text', redirect.detail.after === 're
 await call(route, 'decide', { id: redirect.item.id, action: 'accept' })
 check('shell literal redirect accept allows', (await redirect.parked).kind === 'allow')
 
-const streamed = await parkShell('$js > D:/w/a.txt')
-check('shell runtime redirect says shell-command', streamed.item !== undefined && streamed.item.reason === 'shell-command')
-await call(route, 'decide', { id: streamed.item.id, action: 'accept' })
-check('shell runtime redirect accept allows', (await streamed.parked).kind === 'allow')
+// A redirect whose content the shell supplies is the same shape as `-Value $x`:
+// one known file, text nobody can see, so it is no longer worth stopping for.
+await call(route, 'list', {})
+const streamed = gate(exec('pwsh', { command: '$js > D:/w/a.txt' }), next)
+check('shell runtime redirect is not parked', (await streamed).kind === 'allow')
+const listedStreamed = await call(route, 'list', {})
+check('shell runtime redirect leaves nothing pending', listedStreamed.value.changes.length === 0)
 
 // Writing a file that does not exist yet is a creation, and the whole content is
 // new — the badge must not call it an edit of nothing.
@@ -362,23 +374,25 @@ check('shell here-string interpolates a known value', hereKnown.detail !== undef
 await call(route, 'decide', { id: hereKnown.item.id, action: 'accept' })
 check('shell here-string known accept allows', (await hereKnown.parked).kind === 'allow')
 
-const hereUnknown = await parkShell([
+// No content to show, single known file, and it is only a write: not parked.
+await call(route, 'list', {})
+const hereUnknown = gate(exec('pwsh', { command: [
   '$n = Get-Date',
   '$add = @"',
   'line $n',
   '"@',
   "[System.IO.File]::WriteAllText('D:/w/a.txt', $add)",
-].join('\n'))
-check('shell here-string unknown value says shell-command', hereUnknown.item !== undefined && hereUnknown.item.reason === 'shell-command')
-await call(route, 'decide', { id: hereUnknown.item.id, action: 'accept' })
-check('shell here-string unknown accept allows', (await hereUnknown.parked).kind === 'allow')
+].join('\n') }), next)
+check('shell here-string unknown value is not parked', (await hereUnknown).kind === 'allow')
 
-// The exemption stays narrow: a variable assigned at run time is not knowable.
-const builtAtRuntime = await parkShell("$t = 'a' + 'b'\nSet-Content -Path D:/w/a.txt -Value $t")
-check('shell computed value says shell-command', builtAtRuntime.item !== undefined && builtAtRuntime.item.reason === 'shell-command')
-check('shell computed value has no rows', builtAtRuntime.detail.rows.length === 0)
-await call(route, 'decide', { id: builtAtRuntime.item.id, action: 'accept' })
-check('shell computed value accept allows', (await builtAtRuntime.parked).kind === 'allow')
+// `$t = 'a' + 'b'` is an expression, not a literal, so `$t` stays unknown. It used
+// to be recorded as the garbage text `a'+'b` and shown to the reviewer as if that
+// were the content about to be written; now the write simply goes through unseen.
+await call(route, 'list', {})
+const builtAtRuntime = gate(exec('pwsh', { command: "$t = 'a' + 'b'\nSet-Content -Path D:/w/a.txt -Value $t" }), next)
+check('shell computed value is not parked', (await builtAtRuntime).kind === 'allow')
+const listedBuilt = await call(route, 'list', {})
+check('shell computed value leaves nothing pending', listedBuilt.value.changes.length === 0)
 
 // Interpolation of a variable the same command assigned is still exact text, so
 // `"hello $n"` is reviewable. Only an unknown reference falls back.
@@ -403,10 +417,13 @@ check('shell scripted write has the new text', scripted.detail.after === 'line o
 check('shell scripted write counts both lines', scripted.item.added === 2)
 await call(route, 'decide', { id: scripted.item.id, action: 'accept' })
 check('shell scripted write accept allows', (await scripted.parked).kind === 'allow')
-const unknownRef = await parkShell('Set-Content -Path D:/w/a.txt -Value "hello $env:USERNAME"')
-check('shell unknown reference says shell-command', unknownRef.item !== undefined && unknownRef.item.reason === 'shell-command')
-await call(route, 'decide', { id: unknownRef.item.id, action: 'accept' })
-check('shell unknown reference accept allows', (await unknownRef.parked).kind === 'allow')
+// An environment reference the plugin cannot resolve makes the text unknowable, so
+// this is the same shape as `-Value $x`: one known file, invisible content.
+await call(route, 'list', {})
+const unknownRef = gate(exec('pwsh', { command: 'Set-Content -Path D:/w/a.txt -Value "hello $env:USERNAME"' }), next)
+check('shell unknown reference is not parked', (await unknownRef).kind === 'allow')
+const listedUnknownRef = await call(route, 'list', {})
+check('shell unknown reference leaves nothing pending', listedUnknownRef.value.changes.length === 0)
 
 /* ---- shell shape recognition ---- */
 // A cmdlet inventory can never be complete, so the net keys off shape instead:
@@ -416,9 +433,6 @@ check('shell unknown reference accept allows', (await unknownRef.parked).kind ==
 for (const command of [
   "Set-Item -Path 'D:/w/a.txt' -Value 'one'",
   "Rename-Item -Path 'D:/w/a.txt' -NewName 'b.txt'",
-  "New-Item -Path 'D:/w/dir' -ItemType Directory",
-  "'x' | Tee-Object -FilePath 'D:/w/a.txt'",
-  "Get-Process | Export-Csv -Path 'D:/w/a.csv'",
   "[System.IO.File]::Delete('D:/w/a.txt')",
   "[System.IO.Directory]::Delete('D:/w/dir')",
   "cmd /c del D:/w/a.txt",
@@ -435,6 +449,23 @@ for (const command of [
   check(`shell shape parks ${command}`, parked.item !== undefined)
   await call(route, 'decide', { id: parked.item.id, action: 'accept' })
   check(`shell shape accept allows ${command}`, (await parked.parked).kind === 'allow')
+}
+
+// One known file, text only the shell produces, nothing else touched: the
+// reviewer could not judge it even if the panel opened, so it goes through.
+// These three shapes are the reason the write exemption has to be by shape
+// rather than by cmdlet name — they matched nothing the old whitelist knew, and
+// now they are recognised and deliberately let past.
+for (const command of [
+  "New-Item -Path 'D:/w/dir' -ItemType Directory",
+  "'x' | Tee-Object -FilePath 'D:/w/a.txt'",
+  "Get-Process | Export-Csv -Path 'D:/w/a.csv'",
+]) {
+  await call(route, 'list', {})
+  const unseen = gate(exec('pwsh', { command }), next)
+  check(`shell invisible write is not parked ${command}`, (await unseen).kind === 'allow')
+  const listedUnseen = await call(route, 'list', {})
+  check(`shell invisible write leaves nothing pending ${command}`, listedUnseen.value.changes.length === 0)
 }
 
 // Whether the panel can show a diff depends on the payload, not on the shape: the
@@ -557,6 +588,65 @@ const listedThrowing = await call(throwing.routes[0], 'list', {})
 check('throwing service still parks', listedThrowing.value.changes.length === 1)
 await call(throwing.routes[0], 'decide', { id: listedThrowing.value.changes[0].id, action: 'reject' })
 check('throwing service reject denies', (await parkedThrowing).kind === 'deny')
+
+/* ---- allow the rest of one request ---- */
+// "Allow rest of this request" has to expire with the request, not the session:
+// the exemption is keyed by the turn number the host reports in its event stream.
+const onSessionEvent = handlers.get('session/event')
+check('session/event is subscribed', typeof onSessionEvent === 'function')
+
+const turnEvent = (type, turn) => onSessionEvent({ id: 's1', header: { id: 's1', cwd: 'D:/w' } }, { type, data: { turn } })
+
+await call(route, 'list', {})
+turnEvent('turn/start', 7)
+const beforeAllow = await call(route, 'list', { sessionId: 's1' })
+check('turn id reaches the panel', beforeAllow.value.turn === 7)
+check('turn is not exempt yet', beforeAllow.value.turnAllowed === false)
+
+const firstWrite = gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\none\ngamma\ndelta\n' }), next)
+await wait(30)
+const listedFirst = await call(route, 'list', { sessionId: 's1' })
+check('first write still parks', listedFirst.value.changes.length === 1)
+await call(route, 'decide', { id: listedFirst.value.changes[0].id, action: 'allowTurn' })
+check('allowTurn accepts the pending change', (await firstWrite).kind === 'allow')
+
+const afterAllow = await call(route, 'list', { sessionId: 's1' })
+check('turn reports exempt', afterAllow.value.turnAllowed === true)
+check('nothing left pending after allowTurn', afterAllow.value.changes.length === 0)
+
+// Later writes in the same request go straight through.
+const secondWrite = await gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\ntwo\ngamma\ndelta\n' }), next)
+check('later write in the same request is allowed', secondWrite.kind === 'allow')
+const listedSecond = await call(route, 'list', { sessionId: 's1' })
+check('later write did not park', listedSecond.value.changes.length === 0)
+check('later write reports turn-allowed', listedSecond.value.diag.reason === 'turn-allowed')
+
+// Deletes stay gated even inside an exempt request: the exemption is about not
+// being asked twice for the same kind of silent write, not about blanket trust.
+const deleteInTurn = gate(
+  exec('pwsh', { command: "Remove-Item -LiteralPath 'D:/w/a.txt' -Force" }),
+  next,
+)
+await wait(30)
+const listedDelete = await call(route, 'list', { sessionId: 's1' })
+check('delete still parks inside an exempt request', listedDelete.value.changes.length === 1)
+await call(route, 'decide', { id: listedDelete.value.changes[0].id, action: 'reject' })
+check('delete inside an exempt request can be rejected', (await deleteInTurn).kind === 'deny')
+
+// The next request asks again.
+turnEvent('turn/end', 7)
+const afterEnd = await call(route, 'list', { sessionId: 's1' })
+check('turn/end clears the exemption', afterEnd.value.turnAllowed === false)
+turnEvent('turn/start', 8)
+const nextTurn = await call(route, 'list', { sessionId: 's1' })
+check('a new request is not exempt', nextTurn.value.turnAllowed === false && nextTurn.value.turn === 8)
+await call(route, 'list', {})
+const parkedNextTurn = gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\nthree\ngamma\ndelta\n' }), next)
+await wait(30)
+const listedNextTurn = await call(route, 'list', { sessionId: 's1' })
+check('the next request parks again', listedNextTurn.value.changes.length === 1)
+await call(route, 'decide', { id: listedNextTurn.value.changes[0].id, action: 'accept' })
+check('the next request accepts normally', (await parkedNextTurn).kind === 'allow')
 
 /* ---- not gated ---- */
 await call(route, 'list', {})

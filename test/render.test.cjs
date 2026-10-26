@@ -318,6 +318,55 @@ async function main() {
   if (out.includes('<dshr-name>')) throw new Error('a fileless review invented a file name')
   console.log('command-level review: OK')
 
+  // 5) "allow rest of this request": the button exists only while a turn is known
+  // and not yet exempt, and the panel has to announce when the exemption is in
+  // force — otherwise someone who pressed it once cannot tell why the panel went
+  // quiet. The button and the note are therefore mutually exclusive.
+  React.forcedView = 'unified'
+  listPayload = {
+    ok: true,
+    value: {
+      changes: [
+        { id: 'c4', sessionId: 's1', tool: 'write', displayPath: 'D:/w/app.js', op: 'update', added: 1, removed: 1, oldLineCount: 3, newLineCount: 3, truncated: false, reviewable: true },
+      ],
+      diag: null,
+      turn: 4,
+      turnAllowed: false,
+    },
+  }
+  detailPayload = {
+    ok: true,
+    value: {
+      change: { id: 'c4' },
+      rows: [
+        { t: 'del', a: 2, b: null, text: 'const a = 1' },
+        { t: 'add', a: null, b: 2, text: 'const a = 2' },
+      ],
+      before: 'const a = 1\n',
+      after: 'const a = 2\n',
+    },
+  }
+  await poll()
+  out = await render()
+  if (process.env.DUMP) console.log('ALLOW OUT:', out)
+  if (!out.includes('本轮全允许')) throw new Error('the allow-for-this-request button did not render')
+  if (out.includes('本轮已放行后续写入')) throw new Error('the exemption note showed before it was granted')
+
+  // Without a turn number the exemption cannot be keyed, so the button must stay
+  // out of the way rather than offer something that would never expire.
+  listPayload.value.turn = null
+  await poll()
+  out = await render()
+  if (out.includes('本轮全允许')) throw new Error('the button rendered without a known turn')
+
+  listPayload.value.turn = 4
+  listPayload.value.turnAllowed = true
+  await poll()
+  out = await render()
+  if (!out.includes('本轮已放行后续写入')) throw new Error('the exemption was not announced')
+  if (out.includes('本轮全允许')) throw new Error('the button survived after the exemption was granted')
+  console.log('allow-rest-of-request: OK')
+
   console.log('client render smoke: OK')
 }
 

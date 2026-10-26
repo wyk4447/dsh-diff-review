@@ -29,7 +29,7 @@ DeepSeek Harness 插件：模型**改文件之前**先请你审查，你点「�
 - `$` 引号字符串里的插值，只要引用的变量同样能确定：`` $dir = 'D:\w'; $js = "line one`nline two"; Out-File "$dir/probe.js" -InputObject $js `` 会解析成真实路径 `D:\w\probe.js` 与真实的三行文本（反引号转义如 `` `n `` `` `t `` 一并还原）；
 - **here-string**：多行内容通常这么写。`@'...'@` 原样当作字面文本（不插值），`@"..."@` 按双引号规则插值——引用的变量都确定时同样出真 diff。正文里的 `|`、`&`、花括号、引号都不会被当成命令分隔符。
 
-**算不出来时只确认命令本身**：路径或内容只能由 shell 在运行时决定——通配符（`*` `?` `[` `]`）、没被赋过值的变量（`$env:TEMP\x`、`$(...)`、`${...}`）、运行期才算出来的值（`$t = 'a' + 'b'`、`Get-Date | Out-File f`）、属性或索引访问（`$a.Length`）。这时面板照常弹出、显示完整命令行，并明说「命令操作，无法预知最终内容」——不会假装列出被删的文件，也不会把这种情况说成「改动过大」。文件名里本来就有的 `$`（如 `a$b.txt`）不算展开，仍然按真实路径审查。
+**算不出来时只确认命令本身**：路径或内容只能由 shell 在运行时决定——通配符（`*` `?` `[` `]`）、没被赋过值的变量（`$env:TEMP\x`、`$(...)`、`${...}`）、运行期才算出来的值（`$t = 'a' + 'b'`、`Get-Date | Out-File f`）、属性或索引访问（`$a.Length`）。**这类命令只在会删东西、或者会同时碰多个文件时才弹**：一个已知文件、内容看不见的写入（`Set-Content -Value $x`、`$js > file`、`"hello $env:USERNAME"`）直接放行——让人审批自己看不见的字节是问不出来答案的噪音。真要弹的时候，面板照常显示完整命令行，并明说「命令操作，无法预知最终内容」——不会假装列出被删的文件，也不会把这种情况说成「改动过大」。文件名里本来就有的 `$`（如 `a$b.txt`）不算展开，仍然按真实路径审查。
 
 `$env:NAME` 是唯一例外：环境变量在闸门这一侧就能查出来，所以 `Remove-Item "$env:TEMP\a.txt","$env:TEMP\b.txt"` 会被还原成两个真实路径——落在临时目录里的照 `skipTemp` 放行，落在别处的照常请你确认。一个 `-Path` 里用逗号并列多个目标（`Remove-Item 'a.txt','b.txt'`）也按多个目标算，各自独立解析。同一条命令里反复写同一个文件（先 `[System.IO.File]::WriteAllText` 播种、再 `Set-Content` 覆盖）时，顶栏只写一次文件名，不会变成 `a.txt, a.txt`。
 
@@ -44,6 +44,7 @@ DeepSeek Harness 插件：模型**改文件之前**先请你审查，你点「�
   - **改动视图**：统一 diff，左右两列行号，`+`/`-` 标记，未改动处折叠成「⋯ 未改动的 N 行」；被改写的那一行除了整行底色，改动到的那几个字还会再加一层更深的底色（IDEA 那种行内高亮）
   - **全文视图**：原文 / 新文左右并排，行号跟文件真实行号走，改动行在左边距画彩色竖条（编辑器 gutter 那种效果）；**拖动或滚动任意一侧，另一侧的行与列同步跟动**
 - 多个待审查项在左侧列表里纵向排列，逐条接受或拒绝
+- **本轮全允许**：懒得一条条点时按这个——当前这一轮提问里后续的写入不再询问（下一次提问恢复确认，**删除永远照问**，因为删掉的东西拿不回来）。按下去之后顶栏会写明「本轮已放行后续写入」，让人知道面板为什么突然安静了。宿主报不出轮次时这个按钮不出现，免得给出一个永不过期的豁免
 - 代码区 13px/20px，等宽栈优先 JetBrains Mono → Fira Code → Cascadia Code → Consolas，关闭连字（连字会把 `!=`、`->` 画变形）；正文用系统无衬线，中文走雅黑
 - 配色完全走宿主的 `--dsw-alias-file-diff-*` token，跟随亮/暗主题自动切换，不写死颜色
 - 没有待审查项时显示空态，并把闸门的自检信息收进一张卡片里
@@ -59,7 +60,9 @@ DeepSeek Harness 插件：模型**改文件之前**先请你审查，你点「�
 | 临时目录下的文件 | 直接放行 | `skipTemp` |
 | 工作区 `.dsh/tmp/` 下的文件 | 直接放行 | `skipScratch`，一次性脚本的默认落点 |
 | 二进制 / 超大文件 | 降级为仅统计 | 读不出 UTF-8 时不假装能 diff |
-| 命令写入的内容由 shell 决定 | 降级为仅确认命令 | 面板显示命令行，并说明原因 |
+| 命令写入的内容由 shell 决定 | 只碰一个已存在的文件就放行；删除、多目标、`iex`/`node -e` 这类交给别家程序执行的仍照问 | 看不见的字节问不出答案；但删掉的东西拿不回来，而 `iex $code` 连碰的是什么文件都不知道 |
+| 一条命令同时碰多个文件 | 降级为仅确认命令 | 文件名本身就是这次审查要确认的东西 |
+| 按下「本轮全允许」 | 本轮后续写入直接放行 | 删除仍然照问，下一次提问恢复询问 |
 
 ## 安装
 
@@ -129,9 +132,9 @@ node test\render.test.cjs   # 面板：空态诊断、改动视图、全文视�
 
 > 别用 `node --run test` / `npm test`：Windows 上 Node 在含非 ASCII 字符的路径下会把它算成乱码路径而报「Can't find package.json」。`package.json` 里仍留了 `scripts.test`，放在纯 ASCII 路径下可用。
 
-闸门测试用 mock 的 `ctx` 直接驱动真实的 `apply(ctx)`，覆盖 190 项断言：`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建文件四种）、同一命令里赋值后写出的变量（`$t = 'one'; Set-Content -Value $t`、反引号转义还原、`$p = 'D:/w/a.txt'; Remove-Item $p` 解析成真实文件、`$dir` 参与路径拼接、`"hello $n"` 插值）、运行期才算出来的值降级为命令级（`$t = 'a' + 'b'`、`$env:USERNAME`）、按形状识别的十六种改写命令（`Set-Item`/`Rename-Item`/`New-Item`/`Tee-Object`/`Export-Csv`/`[IO.File]::Delete`/`cmd /c del`/`iex`/`Invoke-Expression`/`node -e`/`python -c`/`powershell -EncodedCommand`/`git clean`/`git checkout --`/管道右端无目标）且参数是字面量时仍出真 diff、形状命中但没有文件名的条目（`iex`/`git clean`/管道右端）标记为命令级且不带路径（`op === 'shell'`、`displayPath` 为空，避免把动词当成文件名）、`-WhatIf`/`Get-ChildItem`/`Write-Host`/`New-Object`/`Add-Type`/`Clear-Host`/`git status`/`node --version` 放行、通配与变量目标的命令级确认（`$p`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、脚本块里的删除（`if (...) { ... }`、`foreach (...) { ... }`、`& { ... }`）、同一命令内赋值参与路径解析、逗号并列多个目标、同一文件被写两次时顶栏只出现一次而两个不同文件按顺序都出现、`$env:TEMP` 目标按临时目录放行、自我豁免、临时目录豁免、工作区 `.dsh/tmp` 豁免且不误豁免 `.dsh/tmpfoo`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起。
+闸门测试用 mock 的 `ctx` 直接驱动真实的 `apply(ctx)`，覆盖 201 项断言：`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建文件四种）、同一命令里赋值后写出的变量（`$t = 'one'; Set-Content -Value $t`、反引号转义还原、`$p = 'D:/w/a.txt'; Remove-Item $p` 解析成真实文件、`$dir` 参与路径拼接、`"hello $n"` 插值）、运行期才算出来的值不再弹（`$t = 'a' + 'b'`、`$env:USERNAME`、`$js > a.txt`）、按形状识别的改写命令（`Set-Item`/`Rename-Item`/`New-Item`/`Tee-Object`/`Export-Csv`/`[IO.File]::Delete`/`cmd /c del`/`iex`/`Invoke-Expression`/`node -e`/`python -c`/`powershell -EncodedCommand`/`git clean`/`git checkout --`/管道右端无目标）且参数是字面量时仍出真 diff、形状命中但没有文件名的条目（`iex`/`git clean`/管道右端）标记为命令级且不带路径（`op === 'shell'`、`displayPath` 为空，避免把动词当成文件名）、只碰一个已知文件且内容看不见的写入放行、`-WhatIf`/`Get-ChildItem`/`Write-Host`/`New-Object`/`Add-Type`/`Clear-Host`/`git status`/`node --version` 放行、通配与变量目标的命令级确认（`$p`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、脚本块里的删除（`if (...) { ... }`、`foreach (...) { ... }`、`& { ... }`）、同一命令内赋值参与路径解析、逗号并列多个目标、同一文件被写两次时顶栏只出现一次而两个不同文件按顺序都出现、`$env:TEMP` 目标按临时目录放行、自我豁免、临时目录豁免、工作区 `.dsh/tmp` 豁免且不误豁免 `.dsh/tmpfoo`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起、**本轮全允许**（同一轮里后续写入直接放行且诊断记为 `turn-allowed`、删除仍照问、`turn/end` 清掉豁免、新一轮重新开始询问、宿主不报轮次时不出现按钮）。
 
-面板测试用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch：验证空态五行诊断、改动视图有 `+`/`-` 标记、改写行只有真正变化的那几个字被加深高亮（前缀不被误涂）、全文视图有双栏与 gutter 竖条、**拖动一侧另一侧同步且不回弹**、删除态第二栏显示「文件将被删除」、命令级审查不出空代码区且用「无法预知最终内容」而不是「改动过大」、命令级条目不再编造文件名（`iex $code` 的面板不显示任何文件名）。
+面板测试用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch：验证空态五行诊断、改动视图有 `+`/`-` 标记、改写行只有真正变化的那几个字被加深高亮（前缀不被误涂）、全文视图有双栏与 gutter 竖条、**拖动一侧另一侧同步且不回弹**、删除态第二栏显示「文件将被删除」、命令级审查不出空代码区且用「无法预知最终内容」而不是「改动过大」、命令级条目不再编造文件名（`iex $code` 的面板不显示任何文件名）、「本轮全允许」按钮只在知道轮次且尚未放行时出现、放行后换成说明并撤掉按钮。
 
 ## 排错
 
