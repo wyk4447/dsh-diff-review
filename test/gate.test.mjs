@@ -118,6 +118,35 @@ for (const harmless of ["Remove-Item 'D:/w/a.txt' -WhatIf", 'Get-ChildItem D:/w'
   check(`shell bypass ${harmless}`, value.kind === 'allow')
 }
 
+// A path the shell expands cannot be resolved, so the gate has to confirm the
+// command itself. Before this was handled, `Remove-Item -LiteralPath $p` parsed
+// as the literal name `$p`, resolved to nothing, and went through unreviewed.
+const expanded = [
+  'Remove-Item -LiteralPath $p -Force',
+  'Remove-Item $env:TEMP\\probe.txt',
+  'Remove-Item -LiteralPath "${target}"',
+  'Set-Content -Path $out -Value hi',
+]
+for (const command of expanded) {
+  await call(route, 'list', {})
+  const parkedExpanded = gate(exec('pwsh', { command }), next)
+  await wait(30)
+  const listedExpanded = await call(route, 'list', {})
+  check(`shell expanded target parks ${command}`, listedExpanded.value.changes.length === 1)
+  await call(route, 'decide', { id: listedExpanded.value.changes[0].id, action: 'reject' })
+  check(`shell expanded target reject denies ${command}`, (await parkedExpanded).kind === 'deny')
+}
+
+// The exemption has to stay narrow: a literal `$` in a file name is a real path.
+await call(route, 'list', {})
+const parkedDollar = gate(exec('pwsh', { command: "Remove-Item -LiteralPath 'D:/w/a$b.txt'" }), next)
+await wait(30)
+const listedDollar = await call(route, 'list', {})
+check('shell literal dollar name still parks', listedDollar.value.changes.length === 1)
+check('shell literal dollar name keeps its path', listedDollar.value.changes[0].path === 'D:/w/a$b.txt')
+await call(route, 'decide', { id: listedDollar.value.changes[0].id, action: 'accept' })
+check('shell literal dollar name accept allows', (await parkedDollar).kind === 'allow')
+
 /* ---- self + temp exemptions ---- */
 await call(route, 'list', {})
 // Derived from this file's own location so the test survives a clone anywhere.
