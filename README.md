@@ -46,12 +46,14 @@ DeepSeek Harness 插件：模型**改文件之前**先请你审查，你点「�
 ### 从 GitHub 安装
 
 ```powershell
-dsh plugin add https://github.com/<你的用户名>/dsh-diff-review.git
+dsh plugin add https://github.com/wyk4447/dsh-diff-review.git
 # 或简写
-dsh plugin add github:<你的用户名>/dsh-diff-review
+dsh plugin add github:wyk4447/dsh-diff-review
 ```
 
 装完在 profile 的 `package.json` 里是版本号/仓库形态，与其它插件一致。改代码后需重新装一次。
+
+> 如果你 fork 了这个仓库，把上面两行的 `wyk4447` 换成你自己的用户名即可。
 
 > Git 托管的插件靠 `prepare` 脚本构建，pnpm 默认会拦 `allowBuilds` 里的构建脚本。本插件**零依赖、没有任何 `prepare`/`install` 脚本**，所以正常情况不需要放行；只有当你在这个仓库里自己加了构建步骤时，才需要把 pnpm 打印的 key 写进 `~/.dsh/profiles/<profile>/pnpm-workspace.yaml` 的 `allowBuilds` 下。
 
