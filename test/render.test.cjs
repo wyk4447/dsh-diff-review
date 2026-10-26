@@ -15,12 +15,21 @@ const React = {
   // The view toggle is a useState the test cannot click, so it is forced here.
   useState: (initial) => [initial === 'unified' && React.forcedView !== null ? React.forcedView : initial, () => {}],
   useMemo: (fn) => fn(),
+  // Refs are real mutable boxes here so the scroll-sync assertion can drive them.
+  useRef: (initial) => {
+    const box = { current: initial === undefined ? null : initial }
+    React.refs.push(box)
+    return box
+  },
+  useCallback: (fn) => fn,
   // Effects are collected and flushed by flushEffects(): the panel loads its
   // detail from a useEffect, so a no-op stub would hide half the component.
   useEffect: (fn) => { pendingEffects.push(fn) },
   useSyncExternalStore: (_sub, get) => get(),
 }
 React.forcedView = null
+React.refs = []
+React.scrollers = []
 
 function flushEffects() {
   while (pendingEffects.length > 0) {
@@ -43,6 +52,10 @@ const windowStub = {
   clearInterval: () => {},
   setTimeout: (fn) => { fn(); return 1 },
   clearTimeout: () => {},
+  // The scroll lock releases on the next frame. Frames are queued, not run, so the
+  // test can prove the mirror write does not bounce back before that release.
+  requestAnimationFrame: (fn) => { windowStub.frames.push(fn); return windowStub.frames.length },
+  frames: [],
 }
 
 const dicts = {}
@@ -112,6 +125,14 @@ function serialize(node) {
   }
   // Class names are part of what this test asserts, so keep them in the dump.
   const className = typeof props.className === 'string' ? `<${props.className}>` : ''
+  // Scroll-sync needs two things the stub world otherwise lacks: a ref that holds
+  // something scrollable, and a handle on the handlers to drive them.
+  if (props.ref && typeof props.ref === 'object') {
+    props.ref.current = { className: props.className, scrollTop: 0, scrollLeft: 0 }
+  }
+  if (typeof props.onScroll === 'function') {
+    React.scrollers.push({ element: props.ref && props.ref.current, onScroll: props.onScroll })
+  }
   return className + serialize(node.children)
 }
 
@@ -180,19 +201,30 @@ async function main() {
     ok: true,
     value: {
       change: { id: 'c1' },
+      // The fixture keeps a long shared prefix on purpose: the assertion below is
+      // that only the differing characters get the stronger shade, so the pair has
+      // to be similar enough to pair at all (INLINE_SIMILARITY) yet differ locally.
       rows: [
         { t: 'equal', a: 1, b: 1, text: 'alpha' },
-        { t: 'del', a: 2, b: null, text: 'beta' },
-        { t: 'add', a: null, b: 2, text: 'BETA' },
+        { t: 'del', a: 2, b: null, text: 'beta line' },
+        { t: 'add', a: null, b: 2, text: 'beta line edited' },
       ],
-      before: 'alpha\nbeta\n',
-      after: 'alpha\nBETA\n',
+      before: 'alpha\nbeta line\n',
+      after: 'alpha\nbeta line edited\n',
     },
   }
   await poll()
   out = await render()
   if (process.env.DUMP) console.log('PENDING OUT:', out.slice(0, 400))
   if (!out.includes('dshr-marker')) throw new Error('unified view did not render markers')
+  // A rewritten line must mark only the characters that differ, or a one-character
+  // edit and a full rewrite look identical at a glance. The fixture appends " edited",
+  // so the stronger shade belongs on exactly that suffix and nowhere else.
+  // The serializer writes a class as <name>, so an emphasised span shows up as
+  // <dshr-inline> immediately followed by the text it covers.
+  if (!out.includes('dshr-inline')) throw new Error('unified view did not emphasise the changed span')
+  if (!out.includes('<dshr-inline> edited')) throw new Error('inline emphasis did not cover the appended text exactly')
+  if (out.includes('<dshr-inline>beta')) throw new Error('inline emphasis covered the unchanged prefix')
   if (!out.includes('dshr-split')) {
     React.forcedView = 'full'
     out = await render()
@@ -200,6 +232,31 @@ async function main() {
     if (!out.includes('dshr-paint')) throw new Error('full view did not render the gutter paint')
   }
   console.log('unified + full: OK')
+
+  // 3) the two full-text panes share one scroll position
+  React.forcedView = 'full'
+  React.scrollers.length = 0
+  await render()
+  const panes = React.scrollers.filter((entry) => entry.element && String(entry.element.className).indexOf('dshr-full') !== -1)
+  if (panes.length < 2) throw new Error('full view did not expose two scrollable panes')
+  const left = panes[panes.length - 2]
+  const right = panes[panes.length - 1]
+  left.element.scrollTop = 120
+  left.element.scrollLeft = 40
+  left.onScroll()
+  if (right.element.scrollTop !== 120) throw new Error('dragging the left pane did not move the right pane')
+  if (right.element.scrollLeft !== 40) throw new Error('horizontal scroll did not follow the other pane')
+  // The mirrored write fires its own scroll event; the lock must swallow it or the
+  // two panes would push each other back and forth on every drag.
+  right.element.scrollTop = 999
+  right.onScroll()
+  if (left.element.scrollTop !== 120) throw new Error('the mirrored scroll bounced back into the dragged pane')
+  while (windowStub.frames.length > 0) windowStub.frames.shift()()
+  right.element.scrollTop = 300
+  right.onScroll()
+  if (left.element.scrollTop !== 300) throw new Error('the other direction stayed locked after the frame')
+  console.log('scroll sync: OK')
+
   console.log('client render smoke: OK')
 }
 
