@@ -560,13 +560,20 @@ check('self skipped', (await gate(exec('write', { file_path: selfFile, content: 
 const tempProbe = `${(process.env.TEMP || 'C:/Temp').replace(/\\\\/g, '/')}/probe.txt`
 check('temp skipped', (await gate(exec('write', { file_path: tempProbe, content: 'x\n' }), next)).kind === 'allow')
 // `skipScratch` covers the workspace scratch directory, which lives under no
-// environment variable: the harness puts every throwaway file in `<ws>/.dsh/tmp`.
-for (const scratch of ['D:/w/.dsh/tmp/probe.cjs', 'D:/w/.dsh/tmp/deep/nest/probe.mjs', 'D:/other/.dsh/tmp/x.html']) {
+// environment variable: the harness puts every throwaway file in `<ws>/.dsh/`,
+// and the agent drops one-off scripts straight into `.dsh/` as well as `.dsh/tmp/`.
+for (const scratch of [
+  'D:/w/.dsh/tmp/probe.cjs',
+  'D:/w/.dsh/tmp/deep/nest/probe.mjs',
+  'D:/other/.dsh/tmp/x.html',
+  'D:/w/.dsh/tmp_find2.js',
+  'D:/w/.dsh/settings.json',
+]) {
   check(`scratch skipped ${scratch}`, (await gate(exec('write', { file_path: scratch, content: 'x\n' }), next)).kind === 'allow')
 }
-// The exemption must stay narrow: a directory that merely starts with the word
-// tmp, or a .dsh file outside tmp, is a real project file and still parks.
-for (const keeper of ['D:/w/.dsh/tmpfoo/probe.cjs', 'D:/w/.dsh/settings.json', 'D:/w/src/tmp/app.js']) {
+// The exemption must stay narrow: a directory that merely starts with the same
+// letters is a real project directory and still parks.
+for (const keeper of ['D:/w/.dsh-tmp/probe.cjs', 'D:/w/.dshtmp/probe.cjs', 'D:/w/src/tmp/app.js']) {
   const parked = gate(exec('write', { file_path: keeper, content: 'x\n' }), next)
   await wait(20)
   const listed = await call(route, 'list', {})
@@ -602,9 +609,12 @@ check('throwing service still parks', listedThrowing.value.changes.length === 1)
 await call(throwing.routes[0], 'decide', { id: listedThrowing.value.changes[0].id, action: 'reject' })
 check('throwing service reject denies', (await parkedThrowing).kind === 'deny')
 
-/* ---- allow the rest of one request ---- */
-// "Allow rest of this request" has to expire with the request, not the session:
-// the exemption is keyed by the turn number the host reports in its event stream.
+/* ---- allow all writes until switched off ---- */
+// The switch is global and manual on purpose. Keying an exemption to the turn
+// number seemed tidier, but every new user message silently re-armed the gate, so
+// "I already allowed this" and "why is it asking again" were both true at once.
+// A switch the reader can see and turn off is the only version that keeps its
+// promise, so the turn number is now a diagnostic and nothing more.
 const onSessionEvent = handlers.get('session/event')
 check('session/event is subscribed', typeof onSessionEvent === 'function')
 
@@ -614,7 +624,7 @@ await call(route, 'list', {})
 turnEvent('turn/start', 7)
 const beforeAllow = await call(route, 'list', { sessionId: 's1' })
 check('turn id reaches the panel', beforeAllow.value.turn === 7)
-check('turn is not exempt yet', beforeAllow.value.turnAllowed === false)
+check('writes are reviewed before the switch', beforeAllow.value.allowAll === false)
 
 const firstWrite = gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\none\ngamma\ndelta\n' }), next)
 await wait(30)
@@ -624,59 +634,70 @@ await call(route, 'decide', { id: listedFirst.value.changes[0].id, action: 'allo
 check('allowTurn accepts the pending change', (await firstWrite).kind === 'allow')
 
 const afterAllow = await call(route, 'list', { sessionId: 's1' })
-check('turn reports exempt', afterAllow.value.turnAllowed === true)
+check('the switch reports on', afterAllow.value.allowAll === true)
 check('nothing left pending after allowTurn', afterAllow.value.changes.length === 0)
 
-// Later writes in the same request go straight through.
+// Later writes go straight through, and that does not depend on the turn: a new
+// user message must not quietly re-arm the gate behind the reader's back.
 const secondWrite = await gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\ntwo\ngamma\ndelta\n' }), next)
-check('later write in the same request is allowed', secondWrite.kind === 'allow')
+check('later write is allowed', secondWrite.kind === 'allow')
 const listedSecond = await call(route, 'list', { sessionId: 's1' })
 check('later write did not park', listedSecond.value.changes.length === 0)
-check('later write reports turn-allowed', listedSecond.value.diag.reason === 'turn-allowed')
+check('later write reports allow-all', listedSecond.value.diag.reason === 'allow-all')
 
-// Deletes stay gated even inside an exempt request: the exemption is about not
-// being asked twice for the same kind of silent write, not about blanket trust.
+// Deletes stay gated even with the switch on: it promises to stop interrupting
+// for writes, and a removal cannot be undone, so silence there would overrun it.
 const deleteInTurn = gate(
   exec('pwsh', { command: "Remove-Item -LiteralPath 'D:/w/a.txt' -Force" }),
   next,
 )
 await wait(30)
 const listedDelete = await call(route, 'list', { sessionId: 's1' })
-check('delete still parks inside an exempt request', listedDelete.value.changes.length === 1)
+check('delete still parks while writes are allowed', listedDelete.value.changes.length === 1)
 await call(route, 'decide', { id: listedDelete.value.changes[0].id, action: 'reject' })
-check('delete inside an exempt request can be rejected', (await deleteInTurn).kind === 'deny')
+check('delete while writes are allowed can be rejected', (await deleteInTurn).kind === 'deny')
 
 // Emptying a file is an edit, not a removal: the file is still there afterwards,
 // and the panel can show every line as removed. Treating it as a delete kept it
-// gated inside an exempt request, which is exactly the interruption the button
-// promised to stop. `Rename-Item` moves the file instead, so it stays gated.
+// gated with the switch on, which is exactly the interruption it promised to
+// stop. `Rename-Item` moves the file instead, so it stays gated.
 await call(route, 'list', {})
 const truncateInTurn = await gate(exec('pwsh', { command: "Clear-Content -Path 'D:/w/a.txt'" }), next)
-check('emptying a file is allowed inside an exempt request', truncateInTurn.kind === 'allow')
+check('emptying a file is allowed while writes are allowed', truncateInTurn.kind === 'allow')
 const listedTruncate = await call(route, 'list', { sessionId: 's1' })
 check('emptying a file did not park', listedTruncate.value.changes.length === 0)
 
 const renameInTurn = gate(exec('pwsh', { command: "Rename-Item -Path 'D:/w/a.txt' -NewName 'b.txt'" }), next)
 await wait(30)
 const listedRename = await call(route, 'list', { sessionId: 's1' })
-check('renaming still parks inside an exempt request', listedRename.value.changes.length === 1)
+check('renaming still parks while writes are allowed', listedRename.value.changes.length === 1)
 await call(route, 'decide', { id: listedRename.value.changes[0].id, action: 'accept' })
-check('rename inside an exempt request can be accepted', (await renameInTurn).kind === 'allow')
+check('rename while writes are allowed can be accepted', (await renameInTurn).kind === 'allow')
 
-// The next request asks again.
+// Neither a new request nor the end of one touches the switch. This is the whole
+// point of replacing a per-turn exemption with it.
 turnEvent('turn/end', 7)
 const afterEnd = await call(route, 'list', { sessionId: 's1' })
-check('turn/end clears the exemption', afterEnd.value.turnAllowed === false)
+check('turn/end leaves the switch alone', afterEnd.value.allowAll === true)
 turnEvent('turn/start', 8)
 const nextTurn = await call(route, 'list', { sessionId: 's1' })
-check('a new request is not exempt', nextTurn.value.turnAllowed === false && nextTurn.value.turn === 8)
+check('a new request leaves the switch alone', nextTurn.value.allowAll === true && nextTurn.value.turn === 8)
+const parkedNextTurn = await gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\nthree\ngamma\ndelta\n' }), next)
+check('a write after the next request still passes', parkedNextTurn.kind === 'allow')
+
+// Turning it off needs no pending change: it has to work from the empty panel,
+// which is exactly where a reader lands right after allowing everything.
+const switchedOff = await call(route, 'decide', { action: 'setAllowAll', value: false })
+check('setAllowAll turns the switch off without a pending change', switchedOff.value.ok === true && switchedOff.value.allowAll === false)
+const offList = await call(route, 'list', { sessionId: 's1' })
+check('the panel sees the switch off', offList.value.allowAll === false)
 await call(route, 'list', {})
-const parkedNextTurn = gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\nthree\ngamma\ndelta\n' }), next)
+const reviewedAgain = gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\nfour\ngamma\ndelta\n' }), next)
 await wait(30)
-const listedNextTurn = await call(route, 'list', { sessionId: 's1' })
-check('the next request parks again', listedNextTurn.value.changes.length === 1)
-await call(route, 'decide', { id: listedNextTurn.value.changes[0].id, action: 'accept' })
-check('the next request accepts normally', (await parkedNextTurn).kind === 'allow')
+const listedAgain = await call(route, 'list', { sessionId: 's1' })
+check('a write after switching off parks again', listedAgain.value.changes.length === 1)
+await call(route, 'decide', { id: listedAgain.value.changes[0].id, action: 'accept' })
+check('that write accepts normally', (await reviewedAgain).kind === 'allow')
 
 /* ---- not gated ---- */
 await call(route, 'list', {})

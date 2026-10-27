@@ -318,10 +318,10 @@ async function main() {
   if (out.includes('<dshr-name>')) throw new Error('a fileless review invented a file name')
   console.log('command-level review: OK')
 
-  // 5) "allow rest of this request": the button exists only while a turn is known
-  // and not yet exempt, and the panel has to announce when the exemption is in
-  // force — otherwise someone who pressed it once cannot tell why the panel went
-  // quiet. The button and the note are therefore mutually exclusive.
+  // 5) The manual switch: it is always on screen and always says which state it
+  // is in. A per-request exemption hid its own button once granted, so a reader
+  // could not find it again — that is the bug this replaced, and the two states
+  // are therefore mutually exclusive but never both absent.
   React.forcedView = 'unified'
   listPayload = {
     ok: true,
@@ -330,10 +330,9 @@ async function main() {
         { id: 'c4', sessionId: 's1', tool: 'write', displayPath: 'D:/w/app.js', op: 'update', added: 1, removed: 1, oldLineCount: 3, newLineCount: 3, truncated: false, reviewable: true },
       ],
       diag: null,
-      // The poller requests no particular session, so the host answers with whole
-      // tables and the pane looks up the id of the change it is showing.
-      turns: { s1: 4 },
-      wavedThrough: {},
+      // One boolean for the whole process: the panel needs no per-session table
+      // because the switch is not scoped to a session or a turn.
+      allowAll: false,
     },
   }
   detailPayload = {
@@ -351,23 +350,26 @@ async function main() {
   await poll()
   out = await render()
   if (process.env.DUMP) console.log('ALLOW OUT:', out)
-  if (!out.includes('本轮全允许')) throw new Error('the allow-for-this-request button did not render')
-  if (out.includes('本轮已放行后续写入')) throw new Error('the exemption note showed before it was granted')
+  if (!out.includes('全部允许')) throw new Error('the allow-all switch did not render')
+  if (out.includes('已全部允许 · 点此关闭')) throw new Error('the switch claimed to be on before it was turned on')
 
-  // Without a turn number the exemption cannot be keyed, so the button must stay
-  // out of the way rather than offer something that would never expire.
-  listPayload.value.turns = {}
+  // Turned on: the same spot now offers the way back off. Without that, the
+  // panel would go quiet with no control to undo it.
+  listPayload.value.allowAll = true
   await poll()
   out = await render()
-  if (out.includes('本轮全允许')) throw new Error('the button rendered without a known turn')
+  if (!out.includes('已全部允许 · 点此关闭')) throw new Error('the switch did not show its on state')
+  if (!out.includes('已全部允许：写入不再询问')) throw new Error('the note did not explain what the switch turned off')
 
-  listPayload.value.turns = { s1: 4 }
-  listPayload.value.wavedThrough = { s1: 4 }
+  // And back off again, which must also work from an empty panel. With nothing to
+  // review there is nothing to allow, so the off switch is the only thing left to
+  // show — its absence here is what the reader is testing for.
+  listPayload.value.allowAll = false
+  listPayload.value.changes = []
   await poll()
   out = await render()
-  if (!out.includes('本轮已放行后续写入')) throw new Error('the exemption was not announced')
-  if (out.includes('本轮全允许')) throw new Error('the button survived after the exemption was granted')
-  console.log('allow-rest-of-request: OK')
+  if (out.includes('已全部允许')) throw new Error('the switch stayed on after being turned off')
+  console.log('allow-all-switch: OK')
 
   console.log('client render smoke: OK')
 }
