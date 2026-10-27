@@ -361,6 +361,16 @@ async function main() {
   if (!out.includes('已全部允许 · 点此关闭')) throw new Error('the switch did not show its on state')
   if (!out.includes('已全部允许：写入不再询问')) throw new Error('the note did not explain what the switch turned off')
 
+  // And the state the reader is actually in a second after flipping it: the last
+  // change was accepted, the queue is empty, and the panel is showing its empty
+  // page. The bar must survive that — an empty panel with no bar is a switch that
+  // cannot be found again, which is the whole bug this is guarding.
+  listPayload.value.changes = []
+  await poll()
+  out = await render()
+  if (!out.includes('已全部允许 · 点此关闭')) throw new Error('the switch vanished once the queue emptied')
+  if (!out.includes('暂无待审查的文件改动')) throw new Error('the empty page did not render under the switch')
+
   // And back off again, which must also work from an empty panel. With nothing to
   // review there is nothing to allow, so the off switch is the only thing left to
   // show — its absence here is what the reader is testing for.
