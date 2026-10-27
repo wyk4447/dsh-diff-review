@@ -674,6 +674,39 @@ check('renaming still parks while writes are allowed', listedRename.value.change
 await call(route, 'decide', { id: listedRename.value.changes[0].id, action: 'accept' })
 check('rename while writes are allowed can be accepted', (await renameInTurn).kind === 'allow')
 
+// The shape that made the switch feel broken: write a scratch file, use it, then
+// delete it. The removal cannot lose anything because the file did not exist when
+// the command started, so the record is a plain `create` and the switch covers it.
+// Keying off the raw text instead of the record stopped every such command, and the
+// prompt it produced still carried the diff, so it read as a write being reviewed
+// again right after "allow all writes".
+await call(route, 'list', {})
+const writeThenRemove = gate(
+  exec('pwsh', {
+    command:
+      "$p='D:/w/fresh.txt'; [System.IO.File]::WriteAllText($p, \"temp`n\"); Remove-Item -LiteralPath $p -Force",
+  }),
+  next,
+)
+check('a write that cleans up after itself is allowed', (await writeThenRemove).kind === 'allow')
+const listedWriteThenRemove = await call(route, 'list', { sessionId: 's1' })
+check('the self-cleaning write did not park', listedWriteThenRemove.value.changes.length === 0)
+check('the self-cleaning write reports allow-all', listedWriteThenRemove.value.diag.reason === 'allow-all')
+
+// Removing something that was already there stays gated even in the same command
+// as a write: that is the one case where silence could lose a file.
+const mixedInTurn = gate(
+  exec('pwsh', {
+    command: "Set-Content -Path 'D:/w/fresh.txt' -Value 'one'; Remove-Item -LiteralPath 'D:/w/a.txt' -Force",
+  }),
+  next,
+)
+await wait(30)
+const listedMixed = await call(route, 'list', { sessionId: 's1' })
+check('a mixed write and removal still parks', listedMixed.value.changes.length === 1)
+await call(route, 'decide', { id: listedMixed.value.changes[0].id, action: 'accept' })
+check('a mixed write and removal can be accepted', (await mixedInTurn).kind === 'allow')
+
 // Neither a new request nor the end of one touches the switch. This is the whole
 // point of replacing a per-turn exemption with it.
 turnEvent('turn/end', 7)
