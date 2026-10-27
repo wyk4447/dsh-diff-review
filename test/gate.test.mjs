@@ -732,6 +732,35 @@ check('a write after switching off parks again', listedAgain.value.changes.lengt
 await call(route, 'decide', { id: listedAgain.value.changes[0].id, action: 'accept' })
 check('that write accepts normally', (await reviewedAgain).kind === 'allow')
 
+/* ---- one review per session ---- */
+// Two Sessions share one process, so the pending map is shared while the panels
+// are not. Session B must not be able to see or answer Session A's change just
+// because it learned the id from the poll.
+const execIn = (id, name, args) => ({
+  ...exec(name, args),
+  agent: { id: id, session: { header: { id: id, cwd: 'D:/w' } } },
+})
+await call(route, 'list', {})
+const otherParked = gate(execIn('s2', 'write', { file_path: 'D:/w/a.txt', content: 'alpha\nbeta\ngamma\nzeta\n' }), next)
+await wait(30)
+const otherListed = await call(route, 'list', { sessionId: 's2' })
+check('the other session parks its own change', otherListed.value.changes.length === 1)
+check('the other session change belongs to s2', otherListed.value.changes[0].sessionId === 's2')
+const otherId = otherListed.value.changes[0].id
+const s1View = await call(route, 'list', { sessionId: 's1' })
+check('the first session does not list it', s1View.value.changes.every((item) => item.id !== otherId))
+const peek = await call(route, 'detail', { id: otherId, sessionId: 's1' })
+check('the first session cannot read the diff', peek.value.missing === true)
+const peekOwn = await call(route, 'detail', { id: otherId, sessionId: 's2' })
+check('the owning session can read the diff', peekOwn.value.change !== undefined && peekOwn.value.change.id === otherId)
+const crossDecide = await call(route, 'decide', { id: otherId, action: 'reject', sessionId: 's1' })
+check('the first session cannot answer it', crossDecide.value.missing === true)
+const stillPending = await call(route, 'list', { sessionId: 's2' })
+check('the refused decision left it pending', stillPending.value.changes.length === 1)
+const ownDecide = await call(route, 'decide', { id: otherId, action: 'accept', sessionId: 's2' })
+check('the owning session answers it', ownDecide.value.ok === true)
+check('the owning session decision applies', (await otherParked).kind === 'allow')
+
 /* ---- not gated ---- */
 await call(route, 'list', {})
 check('read not gated', (await gate(exec('read', { file_path: 'D:/w/a.txt' }), next)).kind === 'allow')

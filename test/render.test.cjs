@@ -381,6 +381,23 @@ async function main() {
   if (out.includes('已全部允许')) throw new Error('the switch stayed on after being turned off')
   console.log('allow-all-switch: OK')
 
+  // The chip sits in one Session's header, so its number must be that Session's
+  // number. Before this filter the title counted the whole poll, which announced
+  // Session A's pending change inside Session B's header.
+  const TabTitle = registered['sidebar.right.pane.tab.title']
+  if (typeof TabTitle !== 'function') throw new Error('tab title not registered')
+  const titleFor = (sid) => serialize(TabTitle({ sessionId: sid }))
+  listPayload.value.allowAll = false
+  listPayload.value.changes = [
+    { id: 'c5', sessionId: 's1', tool: 'write', displayPath: 'D:/w/app.js', op: 'update', added: 1, removed: 1, oldLineCount: 3, newLineCount: 3, truncated: false, reviewable: true },
+    { id: 'c6', sessionId: 's2', tool: 'write', displayPath: 'D:/w/other.js', op: 'update', added: 1, removed: 1, oldLineCount: 3, newLineCount: 3, truncated: false, reviewable: true },
+  ]
+  await poll()
+  if (!titleFor('s1').includes('(1)')) throw new Error('the first session chip did not count its own change')
+  if (!titleFor('s2').includes('(1)')) throw new Error('the second session chip did not count its own change')
+  if (titleFor('s1').includes('(2)')) throw new Error('the chip counted another session change')
+  console.log('session-scoped title: OK')
+
   console.log('client render smoke: OK')
 }
 
