@@ -330,9 +330,10 @@ async function main() {
         { id: 'c4', sessionId: 's1', tool: 'write', displayPath: 'D:/w/app.js', op: 'update', added: 1, removed: 1, oldLineCount: 3, newLineCount: 3, truncated: false, reviewable: true },
       ],
       diag: null,
-      // One boolean for the whole process: the panel needs no per-session table
-      // because the switch is not scoped to a session or a turn.
-      allowAll: false,
+      // One entry per conversation that has the switch on. A plain boolean was
+      // wrong: it made every tab show whichever conversation was toggled last,
+      // so a tab nobody touched lost its own state.
+      allowAll: {},
     },
   }
   detailPayload = {
@@ -355,7 +356,7 @@ async function main() {
 
   // Turned on: the same spot now offers the way back off. Without that, the
   // panel would go quiet with no control to undo it.
-  listPayload.value.allowAll = true
+  listPayload.value.allowAll = { s1: true }
   await poll()
   out = await render()
   if (!out.includes('已全部允许 · 点此关闭')) throw new Error('the switch did not show its on state')
@@ -371,10 +372,17 @@ async function main() {
   if (!out.includes('已全部允许 · 点此关闭')) throw new Error('the switch vanished once the queue emptied')
   if (!out.includes('暂无待审查的文件改动')) throw new Error('the empty page did not render under the switch')
 
+  // Another conversation's tab must not inherit this one's state. It is the bug
+  // that prompted the per-session table: flipping the switch in one panel used to
+  // change every other panel, so a tab nobody touched could lose its own button.
+  const otherTab = serialize(TabBody({ sessionId: 's2' }))
+  if (otherTab.includes('已全部允许')) throw new Error('this conversation switch leaked into another one')
+  if (!otherTab.includes('全部允许')) throw new Error('the other conversation lost its off switch')
+
   // And back off again, which must also work from an empty panel. With nothing to
   // review there is nothing to allow, so the off switch is the only thing left to
   // show — its absence here is what the reader is testing for.
-  listPayload.value.allowAll = false
+  listPayload.value.allowAll = {}
   listPayload.value.changes = []
   await poll()
   out = await render()
@@ -387,7 +395,7 @@ async function main() {
   const TabTitle = registered['sidebar.right.pane.tab.title']
   if (typeof TabTitle !== 'function') throw new Error('tab title not registered')
   const titleFor = (sid) => serialize(TabTitle({ sessionId: sid }))
-  listPayload.value.allowAll = false
+  listPayload.value.allowAll = {}
   listPayload.value.changes = [
     { id: 'c5', sessionId: 's1', tool: 'write', displayPath: 'D:/w/app.js', op: 'update', added: 1, removed: 1, oldLineCount: 3, newLineCount: 3, truncated: false, reviewable: true },
     { id: 'c6', sessionId: 's2', tool: 'write', displayPath: 'D:/w/other.js', op: 'update', added: 1, removed: 1, oldLineCount: 3, newLineCount: 3, truncated: false, reviewable: true },

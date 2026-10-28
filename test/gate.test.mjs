@@ -610,13 +610,25 @@ await call(throwing.routes[0], 'decide', { id: listedThrowing.value.changes[0].i
 check('throwing service reject denies', (await parkedThrowing).kind === 'deny')
 
 /* ---- allow all writes until switched off ---- */
-// The switch is global and manual on purpose. Keying an exemption to the turn
-// number seemed tidier, but every new user message silently re-armed the gate, so
-// "I already allowed this" and "why is it asking again" were both true at once.
+// The switch is manual and belongs to one conversation. Keying an exemption to the
+// turn number seemed tidier, but every new user message silently re-armed the gate,
+// so "I already allowed this" and "why is it asking again" were both true at once.
 // A switch the reader can see and turn off is the only version that keeps its
 // promise, so the turn number is now a diagnostic and nothing more.
+//
+// It is per session because one shared flag made two conversations disagree about
+// their own state: flipping it in the conversation on screen silenced — or
+// re-armed — every other conversation, and a tab with nothing pending had no state
+// of its own left to show.
 const onSessionEvent = handlers.get('session/event')
 check('session/event is subscribed', typeof onSessionEvent === 'function')
+
+// A tool call made on behalf of a named Session: the switch is per session, so the
+// tests have to be able to say which conversation a write came from.
+const execIn = (id, name, args) => ({
+  ...exec(name, args),
+  agent: { id: id, session: { header: { id: id, cwd: 'D:/w' } } },
+})
 
 const turnEvent = (type, turn) => onSessionEvent({ id: 's1', header: { id: 's1', cwd: 'D:/w' } }, { type, data: { turn } })
 
@@ -624,7 +636,7 @@ await call(route, 'list', {})
 turnEvent('turn/start', 7)
 const beforeAllow = await call(route, 'list', { sessionId: 's1' })
 check('turn id reaches the panel', beforeAllow.value.turn === 7)
-check('writes are reviewed before the switch', beforeAllow.value.allowAll === false)
+check('writes are reviewed before the switch', beforeAllow.value.allowAll.s1 !== true)
 
 const firstWrite = gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\none\ngamma\ndelta\n' }), next)
 await wait(30)
@@ -634,8 +646,20 @@ await call(route, 'decide', { id: listedFirst.value.changes[0].id, action: 'allo
 check('allowTurn accepts the pending change', (await firstWrite).kind === 'allow')
 
 const afterAllow = await call(route, 'list', { sessionId: 's1' })
-check('the switch reports on', afterAllow.value.allowAll === true)
+check('the switch reports on', afterAllow.value.allowAll.s1 === true)
 check('nothing left pending after allowTurn', afterAllow.value.changes.length === 0)
+
+// The switch covers the conversation it was flipped in, and only that one.
+const otherSessionBefore = await call(route, 'list', { sessionId: 's2' })
+check('another conversation stays reviewed', otherSessionBefore.value.allowAll.s2 !== true)
+const otherWrite = gate(execIn('s2', 'write', { file_path: 'D:/w/b.txt', content: 'alpha\nbeta\ngamma\nzeta\n' }), next)
+await wait(30)
+const listedOther = await call(route, 'list', { sessionId: 's2' })
+check('another conversation still parks', listedOther.value.changes.length === 1)
+await call(route, 'decide', { id: listedOther.value.changes[0].id, action: 'reject' })
+check('another conversation can be rejected', (await otherWrite).kind === 'deny')
+const afterOther = await call(route, 'list', { sessionId: 's1' })
+check('rejecting there left this switch alone', afterOther.value.allowAll.s1 === true)
 
 // Later writes go straight through, and that does not depend on the turn: a new
 // user message must not quietly re-arm the gate behind the reader's back.
@@ -711,19 +735,19 @@ check('a mixed write and removal can be accepted', (await mixedInTurn).kind === 
 // point of replacing a per-turn exemption with it.
 turnEvent('turn/end', 7)
 const afterEnd = await call(route, 'list', { sessionId: 's1' })
-check('turn/end leaves the switch alone', afterEnd.value.allowAll === true)
+check('turn/end leaves the switch alone', afterEnd.value.allowAll.s1 === true)
 turnEvent('turn/start', 8)
 const nextTurn = await call(route, 'list', { sessionId: 's1' })
-check('a new request leaves the switch alone', nextTurn.value.allowAll === true && nextTurn.value.turn === 8)
+check('a new request leaves the switch alone', nextTurn.value.allowAll.s1 === true && nextTurn.value.turn === 8)
 const parkedNextTurn = await gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\nthree\ngamma\ndelta\n' }), next)
 check('a write after the next request still passes', parkedNextTurn.kind === 'allow')
 
 // Turning it off needs no pending change: it has to work from the empty panel,
 // which is exactly where a reader lands right after allowing everything.
-const switchedOff = await call(route, 'decide', { action: 'setAllowAll', value: false })
-check('setAllowAll turns the switch off without a pending change', switchedOff.value.ok === true && switchedOff.value.allowAll === false)
+const switchedOff = await call(route, 'decide', { action: 'setAllowAll', value: false, sessionId: 's1' })
+check('setAllowAll turns the switch off without a pending change', switchedOff.value.ok === true && switchedOff.value.allowAll.s1 !== true)
 const offList = await call(route, 'list', { sessionId: 's1' })
-check('the panel sees the switch off', offList.value.allowAll === false)
+check('the panel sees the switch off', offList.value.allowAll.s1 !== true)
 await call(route, 'list', {})
 const reviewedAgain = gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\nfour\ngamma\ndelta\n' }), next)
 await wait(30)
@@ -732,14 +756,20 @@ check('a write after switching off parks again', listedAgain.value.changes.lengt
 await call(route, 'decide', { id: listedAgain.value.changes[0].id, action: 'accept' })
 check('that write accepts normally', (await reviewedAgain).kind === 'allow')
 
+// Switching one conversation off must not re-arm, or silence, another. This is the
+// bug that started it: the panel's switch used to be one process-wide boolean, so
+// the conversation nobody touched lost its state along with the one being toggled.
+const scopedOn = await call(route, 'decide', { action: 'setAllowAll', value: true, sessionId: 's1' })
+check('one conversation can be switched on alone', scopedOn.value.allowAll.s1 === true && scopedOn.value.allowAll.s2 !== true)
+const scopedOff = await call(route, 'decide', { action: 'setAllowAll', value: false, sessionId: 's1' })
+check('switching it off leaves the other untouched', scopedOff.value.allowAll.s1 !== true && scopedOff.value.allowAll.s2 !== true)
+const noOwner = await call(route, 'decide', { action: 'setAllowAll', value: true })
+check('a switch with no conversation is refused', noOwner.value.missing === true)
+
 /* ---- one review per session ---- */
 // Two Sessions share one process, so the pending map is shared while the panels
 // are not. Session B must not be able to see or answer Session A's change just
 // because it learned the id from the poll.
-const execIn = (id, name, args) => ({
-  ...exec(name, args),
-  agent: { id: id, session: { header: { id: id, cwd: 'D:/w' } } },
-})
 await call(route, 'list', {})
 const otherParked = gate(execIn('s2', 'write', { file_path: 'D:/w/a.txt', content: 'alpha\nbeta\ngamma\nzeta\n' }), next)
 await wait(30)
