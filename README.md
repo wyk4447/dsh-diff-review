@@ -79,6 +79,8 @@ dsh plugin add github:wyk4447/dsh-diff-review
 
 装完在 profile 的 `package.json` 里是版本号/仓库形态，与其它插件一致。改代码后需重新装一次。
 
+> **兼容的 DSH 版本**：`engines.dsh` 声明为 `>=0.2.1-rc.1 <0.3.0-0`。DSH 在导入前会把这条范围和正在运行的版本比对（预发布版参与匹配），不匹配就拒绝加载整个插件、并把它变成一条 `disabled: true` 的孤儿行。0.1.0 版本写的是 `>=0.2.1-rc.1 <0.2.2-0`，升级到 DSH `0.2.2-rc.1` 后就会被判定不兼容，0.1.1 起放宽到整个 `0.2.x`。
+
 > 如果你 fork 了这个仓库，把上面两行的 `wyk4447` 换成你自己的用户名即可。
 
 > Git 托管的插件靠 `prepare` 脚本构建，pnpm 默认会拦 `allowBuilds` 里的构建脚本。本插件**零依赖、没有任何 `prepare`/`install` 脚本**，所以正常情况不需要放行；只有当你在这个仓库里自己加了构建步骤时，才需要把 pnpm 打印的 key 写进 `~/.dsh/profiles/<profile>/pnpm-workspace.yaml` 的 `allowBuilds` 下。
