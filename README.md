@@ -29,19 +29,25 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 
 统一 diff，左右两列行号，`+`/`-` 标记，未改动处折叠成「⋯ 未改动的 N 行」。被改写的行除了整行底色，**改动到的那几个字**还会再加一层更深的底色。
 
-![改动视图，行内高亮](assets/screenshot-2.png)
+![改动视图，行内高亮](assets/screenshot-1.png)
 
 ### 全文视图
 
 原文 / 新文左右并排，行号跟文件真实行号走，改动行在左边距画彩色竖条（编辑器的 gutter 效果）。**拖或滚任意一侧，另一侧的行与列同步跟动。**
 
-![全文视图，双栏同步滚动](assets/screenshot-3.png)
+![全文视图，双栏同步滚动](assets/screenshot-2.png)
 
 ### 命令级审查
 
 命令要碰的文件或内容只有 shell 运行时才知道（`iex $code`、内容来自 `$env:USERNAME`）——面板给完整命令行，并明说为什么算不出 diff。
 
-![命令级审查](assets/screenshot-4.png)
+![命令级审查](assets/screenshot-3.png)
+
+### 删除级审查
+
+`pwsh` 里的 `Remove-Item` / `rm` / `[IO.File]::Delete` 这类删除命令，面板把**将被删掉的整段原文**逐行标红列出来，一并给出原始命令行——先看清楚要没的是什么，再决定。
+
+![删除级审查](assets/screenshot-4.png)
 
 ## 拦什么
 
