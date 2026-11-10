@@ -4,6 +4,7 @@ const vm = require('node:vm')
 const source = fs.readFileSync(require('node:path').join(__dirname, '..', 'lib', 'client.js'), 'utf8')
 
 let registered = {}
+let tabDefinition = null
 const store = { current: { changes: [], detail: null, detailId: null, error: null, ready: true, diag: null } }
 let listPayload = { ok: true, value: { changes: [], diag: null } }
 let detailPayload = { ok: true, value: { missing: true } }
@@ -66,7 +67,13 @@ const ctx = {
   },
   effect: (fn) => { const d = fn(); return () => d && d() },
   slots: { inject: (_n, fn) => fn(), register: (meta, comp) => { registered[meta.name] = comp; return () => {} } },
-  sidebarRightTabs: { register: () => () => {} },
+  sidebarRightTabs: {
+    // Keep the definition: the guide entry's artwork is what the sidebar's "start"
+    // page draws for us, and a type with no `icon` silently falls back to the
+    // sidebar's own cube — the exact failure where changing the manifest icon
+    // changed nothing the user could see.
+    register: (definition) => { tabDefinition = definition; return () => {} },
+  },
   sidebarRight: { openTabIn: () => {} },
   get: () => undefined,
 }
@@ -405,6 +412,27 @@ async function main() {
   if (!titleFor('s2').includes('(1)')) throw new Error('the second session chip did not count its own change')
   if (titleFor('s1').includes('(2)')) throw new Error('the chip counted another session change')
   console.log('session-scoped title: OK')
+
+  // The guide entry is what the sidebar's "start" page lists. Its artwork comes
+  // from the type definition, not from the manifest: a type with no `icon` renders
+  // the sidebar's own cube, so a missing icon here is invisible to any test that
+  // only looks at the manifest file. Read the vnode rather than its serialisation —
+  // the serialiser here keeps class names only, and an <svg> has none.
+  if (tabDefinition === null) throw new Error('tab type was never registered')
+  const guideEntry = Array.isArray(tabDefinition.guide) ? tabDefinition.guide[0] : undefined
+  if (guideEntry === undefined) throw new Error('the tab type lost its guide entry')
+  if (typeof guideEntry.icon !== 'function') throw new Error('the guide entry has no artwork, so the start page draws the sidebar cube')
+  const artwork = guideEntry.icon({ size: 22 })
+  if (artwork === null || typeof artwork !== 'object' || artwork.type !== 'svg') throw new Error('the guide artwork is not an svg')
+  if (artwork.props.viewBox !== '0 0 1024 1024') throw new Error('the guide artwork lost its viewBox')
+  if (artwork.props.width !== 22 || artwork.props.height !== 22) throw new Error('the guide artwork ignored the size the sidebar passed')
+  const paths = Array.isArray(artwork.children) ? artwork.children : []
+  if (paths.length !== 2) throw new Error('the guide artwork lost one of its two shapes')
+  const fills = paths.map((path) => (path && path.props ? path.props.fill : undefined))
+  if (fills.indexOf('#D6F3FA') === -1 || fills.indexOf('#18BAE5') === -1) throw new Error('the guide artwork lost its literal fills')
+  if (fills.some((fill) => typeof fill !== 'string' || fill.indexOf('currentColor') !== -1)) throw new Error('the guide artwork relies on currentColor, which neither an <img> nor the sidebar ink provides')
+  if (paths.some((path) => typeof path.props.d !== 'string' || path.props.d.length < 100)) throw new Error('the guide artwork lost its path data')
+  console.log('guide artwork: OK')
 
   console.log('client render smoke: OK')
 }
