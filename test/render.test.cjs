@@ -8,13 +8,22 @@ let tabDefinition = null
 const store = { current: { changes: [], detail: null, detailId: null, error: null, ready: true, diag: null } }
 let listPayload = { ok: true, value: { changes: [], diag: null } }
 let detailPayload = { ok: true, value: { missing: true } }
+let historyPayload = { ok: true, value: { entries: [] } }
 
 const pendingEffects = []
 const React = {
   createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
   Component: class { constructor(p) { this.props = p; this.state = {} } },
   // The view toggle is a useState the test cannot click, so it is forced here.
-  useState: (initial) => [initial === 'unified' && React.forcedView !== null ? React.forcedView : initial, () => {}],
+  // The history screen has the same problem twice over: no state update reaches
+  // this stub, and its list arrives from a fetch the stub resolves after the
+  // render. Forcing both values is the only way to reach that screen.
+  useState: (initial) => {
+    if (initial === 'unified' && React.forcedView !== null) return [React.forcedView, () => {}]
+    if (initial === false && React.forcedHistory === true) return [true, () => {}]
+    if (Array.isArray(initial) && React.forcedList !== null) return [React.forcedList, () => {}]
+    return [initial, () => {}]
+  },
   useMemo: (fn) => fn(),
   // Refs are real mutable boxes here so the scroll-sync assertion can drive them.
   useRef: (initial) => {
@@ -29,6 +38,8 @@ const React = {
   useSyncExternalStore: (_sub, get) => get(),
 }
 React.forcedView = null
+React.forcedHistory = false
+React.forcedList = null
 React.refs = []
 React.scrollers = []
 
@@ -83,7 +94,11 @@ const sandbox = {
   document: documentStub,
   fetch: async (url) => {
     const path = String(url)
-    const payload = path.endsWith('/list') ? listPayload : detailPayload
+    const payload = path.endsWith('/list')
+      ? listPayload
+      : path.endsWith('/history')
+        ? historyPayload
+        : detailPayload
     return { ok: true, status: 200, json: async () => payload }
   },
   console,
@@ -433,6 +448,40 @@ async function main() {
   if (fills.some((fill) => typeof fill !== 'string' || fill.indexOf('currentColor') !== -1)) throw new Error('the guide artwork relies on currentColor, which neither an <img> nor the sidebar ink provides')
   if (paths.some((path) => typeof path.props.d !== 'string' || path.props.d.length < 100)) throw new Error('the guide artwork lost its path data')
   console.log('guide artwork: OK')
+
+  // The history screen: what was already reviewed, and the one action it offers.
+  // It has to be reachable with nothing pending, because that is exactly when a
+  // reader wants to take back the change they just accepted.
+  historyPayload = {
+    ok: true,
+    value: {
+      entries: [
+        { id: 'h1', path: 'D:/w/accepted.js', op: 'update', state: 'accepted', restorable: true, verify: { kind: 'sha', sha: 'aa' }, restoredAt: null },
+        { id: 'h2', path: 'D:/w/gone.js', op: 'delete', state: 'accepted', restorable: true, verify: { kind: 'absent' }, restoredAt: 1 },
+        { id: 'h3', path: 'D:/w/refused.js', op: 'update', state: 'rejected', restorable: true, verify: { kind: 'sha', sha: 'bb' }, restoredAt: null },
+        { id: 'h4', path: 'D:/w/big.js', op: 'update', state: 'accepted', restorable: false, verify: null, restoredAt: null },
+      ],
+    },
+  }
+  // The screen's own state is a useState the stub cannot update, and its list
+  // arrives from a fetch that resolves after the render. Both are forced here.
+  React.forcedList = historyPayload.value.entries
+  listPayload = { ok: true, value: { changes: [], diag: null, allowAll: {} } }
+  detailPayload = { ok: true, value: { missing: true } }
+  React.forcedHistory = true
+  await poll()
+  out = await render()
+  if (process.env.DUMP) console.log('HISTORY OUT:', out)
+  if (!out.includes('accepted.js')) throw new Error('the history screen did not list a reviewed change')
+  if (!out.includes('已还原')) throw new Error('the history screen did not mark an already-restored entry')
+  // Exactly one undo button: the restored entry, the rejected one (never reached
+  // the disk) and the truncated one (no trustworthy bytes) must not offer one.
+  if ((out.match(/<dshr-btn>/g) || []).length === 0) throw new Error('the history screen offered no undo at all')
+  const undoButtons = out.split('<dshr-btn>').filter((chunk) => chunk.startsWith('还原'))
+  if (undoButtons.length !== 1) throw new Error(`the history screen offered ${undoButtons.length} undos, expected 1`)
+  if (out.includes('本会话还没有审查记录')) throw new Error('the history screen showed its empty hint with entries present')
+  React.forcedHistory = false
+  React.forcedList = null
 
   console.log('client render smoke: OK')
 }

@@ -1,6 +1,6 @@
 {
   "name": "dsh-diff-review",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Review file changes before they happen — diff preview and approve/reject in the sidebar.",
   "type": "module",
   "main": "lib/index.js",
@@ -21,7 +21,7 @@
     "approval"
   ],
   "scripts": {
-    "test": "node test/gate.test.mjs && node test/render.test.cjs"
+    "test": "node test/gate.test.mjs && node test/render.test.cjs && node test/history.test.mjs"
   },
   "exports": {
     ".": "./lib/index.js",

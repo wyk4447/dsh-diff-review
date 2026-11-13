@@ -1,8 +1,24 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply } from '../lib/index.js'
 
+// Snapshots go to a throwaway directory: a test run must not fill the real
+// `~/.dsh/diff-review/history` with entries for files that never existed.
+const snapshotRoot = mkdtempSync(join(tmpdir(), 'diff-review-gate-'))
+process.env.DSH_DIFF_REVIEW_HISTORY_ROOT = snapshotRoot
+
 const results = []
 const check = (label, value) => results.push([label, value === true])
+
+// A tiny stand-in for the workspace, so a restore has something real to change.
+// `readText` used to be a constant, which made "the file changed after the
+// review" impossible to express — the exact case a safe undo has to refuse.
+const DEFAULT_TEXT = 'alpha\nbeta\ngamma\ndelta\n'
+const files = new Map()
+const writes = []
+const currentText = (key) => (files.has(key) ? files.get(key) : DEFAULT_TEXT)
 
 function makeCtx({ dir = 'D:/w', absent = false, throwOnGet = false } = {}) {
   const routes = []
@@ -21,8 +37,21 @@ function makeCtx({ dir = 'D:/w', absent = false, throwOnGet = false } = {}) {
       resolve: async (p) => ({ targetKey: p, displayPath: p }),
       // `fresh.txt` does not exist in this fake workspace: that is what makes the
       // creation path distinguishable from an overwrite.
-      stat: async (target) => (String(target.targetKey).includes('fresh.txt') ? undefined : { version: 'v1', type: 'file' }),
-      readText: async () => 'alpha\nbeta\ngamma\ndelta\n',
+      stat: async (target) => (String(target.targetKey).includes('fresh.txt') || files.get(String(target.targetKey)) === null
+        ? undefined
+        : { version: 'v1', type: 'file' }),
+      readText: async (target) => currentText(String(target.targetKey)),
+      writeText: async (target, content) => {
+        writes.push({ key: String(target.targetKey), content })
+        files.set(String(target.targetKey), content)
+        return { operation: 'write', version: 'v2' }
+      },
+      deleteFile: async (target) => {
+        const key = String(target.targetKey)
+        const before = currentText(key)
+        files.set(key, null)
+        return { before }
+      },
     },
   }
   return { ctx, routes, handlers }
@@ -851,6 +880,76 @@ const ownDecide = await call(route, 'decide', { id: otherId, action: 'accept', s
 check('the owning session answers it', ownDecide.value.ok === true)
 check('the owning session decision applies', (await otherParked).kind === 'allow')
 
+/* ---- undo ---- */
+// The point of the snapshot store: a change the reviewer accepted can be taken
+// back, but only while the file still looks the way that change left it.
+const undoContent = 'alpha\nbeta\ngamma\nUNDO\n'
+const undoParked = gate(exec('write', { file_path: 'D:/w/undo.txt', content: undoContent }), next)
+await wait(30)
+const undoListed = await call(route, 'list', {})
+const undoId = undoListed.value.changes[undoListed.value.changes.length - 1].id
+await call(route, 'decide', { id: undoId, action: 'accept', sessionId: 's1' })
+check('the undoable write was accepted', (await undoParked).kind === 'allow')
+
+const undoHistory = await call(route, 'history', { sessionId: 's1' })
+const undoEntry = undoHistory.value.entries.find((entry) => entry.id === undoId)
+check('an accepted write appears in the history', undoEntry !== undefined)
+check('the history entry says what happened', undoEntry !== undefined && undoEntry.state === 'accepted')
+check('the history entry offers an undo', undoEntry !== undefined && undoEntry.restorable === true)
+
+// The fake host does not perform writes, so the tool's effect is applied here
+// the way a real workspace would have it after the tool ran.
+files.set('D:/w/undo.txt', undoContent)
+const undoOnce = await call(route, 'restore', { id: undoId, sessionId: 's1' })
+check('an accepted change can be taken back', undoOnce.value.ok === true)
+check('the file is back to its previous text', currentText('D:/w/undo.txt') === DEFAULT_TEXT)
+const undoAgain = await call(route, 'restore', { id: undoId, sessionId: 's1' })
+check('undoing twice is refused', undoAgain.value.error === 'already-restored')
+
+// A file that changed after the review must not be reverted: the undo would
+// silently throw away whatever wrote it since.
+const staleContent = 'alpha\nbeta\ngamma\nSTALE\n'
+const staleParked = gate(exec('write', { file_path: 'D:/w/stale.txt', content: staleContent }), next)
+await wait(30)
+const staleListed = await call(route, 'list', {})
+const staleId = staleListed.value.changes[staleListed.value.changes.length - 1].id
+await call(route, 'decide', { id: staleId, action: 'accept', sessionId: 's1' })
+await staleParked
+files.set('D:/w/stale.txt', 'edited afterwards\n')
+const staleUndo = await call(route, 'restore', { id: staleId, sessionId: 's1' })
+check('a file edited since is not reverted', staleUndo.value.error === 'stale')
+check('the newer text survives the refused undo', currentText('D:/w/stale.txt') === 'edited afterwards\n')
+
+// A rejected change never reached the disk, so there is nothing to undo.
+const rejectedParked = gate(exec('write', { file_path: 'D:/w/rejected.txt', content: 'alpha\nbeta\ngamma\nNO\n' }), next)
+await wait(30)
+const rejectedListed = await call(route, 'list', {})
+const rejectedId = rejectedListed.value.changes[rejectedListed.value.changes.length - 1].id
+await call(route, 'decide', { id: rejectedId, action: 'reject', sessionId: 's1' })
+check('the rejected write was refused', (await rejectedParked).kind !== 'allow')
+const rejectedUndo = await call(route, 'restore', { id: rejectedId, sessionId: 's1' })
+check('undoing a rejected change is refused', rejectedUndo.value.error === 'not-applied')
+
+// A removal is undone by putting the bytes back.
+const goneParked = gate(exec('pwsh', { command: "Remove-Item -LiteralPath 'D:/w/gone.txt' -Force" }), next)
+await wait(30)
+const goneListed = await call(route, 'list', {})
+const goneId = goneListed.value.changes[goneListed.value.changes.length - 1].id
+await call(route, 'decide', { id: goneId, action: 'accept', sessionId: 's1' })
+check('the removal was accepted', (await goneParked).kind === 'allow')
+files.set('D:/w/gone.txt', null)
+const goneUndo = await call(route, 'restore', { id: goneId, sessionId: 's1' })
+check('a removal can be undone', goneUndo.value.ok === true)
+check('the removed bytes are back', currentText('D:/w/gone.txt') === DEFAULT_TEXT)
+
+// The history is per conversation, like every other panel call.
+const foreignHistory = await call(route, 'history', { sessionId: 's2' })
+check('another conversation does not see these undo entries', foreignHistory.value.entries.every((entry) => entry.id !== undoId))
+const foreignUndo = await call(route, 'restore', { id: staleId, sessionId: 's2' })
+check('another conversation cannot undo them', foreignUndo.value.missing === true)
+const unknownUndo = await call(route, 'restore', { id: 'no-such-change', sessionId: 's1' })
+check('an unknown change cannot be undone', unknownUndo.value.missing === true)
+
 /* ---- not gated ---- */
 await call(route, 'list', {})
 check('read not gated', (await gate(exec('read', { file_path: 'D:/w/a.txt' }), next)).kind === 'allow')
@@ -860,5 +959,7 @@ for (const [label, ok] of results) {
   if (!ok) failed += 1
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`)
 }
+// Leave no trace: the snapshot directory belongs to this run alone.
+rmSync(snapshotRoot, { recursive: true, force: true })
 console.log(failed === 0 ? 'ALL PASS' : `${failed} FAILED`)
 process.exit(failed === 0 ? 0 : 1)
