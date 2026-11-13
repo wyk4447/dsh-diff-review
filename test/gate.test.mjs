@@ -582,6 +582,66 @@ for (const keeper of ['D:/w/.dsh-tmp/probe.cjs', 'D:/w/.dshtmp/probe.cjs', 'D:/w
   await parked
 }
 
+/* ---- generated directories ---- */
+// A build cache is not source: the largest single pile of noise in a real log was
+// `__pycache__` deletions — Python regenerates them on the next import, and the
+// reviewer had never written them. Directories a tool owns outright are skipped;
+// names that can hold hand-written files (`bin`, `lib`, `public`, `src`) are not.
+for (const noise of [
+  'D:/p/__pycache__/mod.cpython-311.pyc',
+  'D:/p/node_modules/react/index.js',
+  'D:/p/dist/app.js',
+  'D:/p/build/out.bin',
+  'D:/p/target/classes/A.class',
+  'D:/p/src/coverage/lcov.info',
+  'D:/p/.venv/lib/site.py',
+  'D:/p/vendor/github.com/x/y.go',
+  'D:/p/.pytest_cache/v/cache/lastfailed',
+  'D:/p/obj/project.assets.json',
+]) {
+  check(`noise skipped ${noise}`, (await gate(exec('write', { file_path: noise, content: 'x\n' }), next)).kind === 'allow')
+}
+// Version control is the exception: a hook is a program that runs on the next
+// commit, and a rewrite there is exactly what a reviewer has to see.
+for (const guarded of ['D:/p/.git/hooks/pre-commit', 'D:/p/.git/config']) {
+  await call(route, 'list', {})
+  const parked = gate(exec('write', { file_path: guarded, content: 'x\n' }), next)
+  await wait(20)
+  const listed = await call(route, 'list', {})
+  check(`version control still parks ${guarded}`, listed.value.changes.some((item) => item.path === guarded))
+  await call(route, 'decide', { id: listed.value.changes[0].id, action: 'reject' })
+  await parked
+}
+// A removal of a generated directory is the case that actually hurt: it parked
+// every time, carried no diff, and was approved without being read.
+await call(route, 'list', {})
+const noiseRm = await gate(exec('pwsh', { command: "Remove-Item -LiteralPath 'D:/p/__pycache__' -Recurse -Force" }), next)
+check('noise delete is not parked', (await noiseRm).kind === 'allow')
+check('noise delete leaves nothing pending', (await call(route, 'list', {})).value.changes.length === 0)
+// Backslashes are what the host actually reports on Windows.
+check('noise matches a backslash path', (await gate(exec('write', { file_path: 'D:\\p\\dist\\a.js', content: 'x\n' }), next)).kind === 'allow')
+// The exemption is segment-wise, so a project merely named like one still parks.
+for (const keeper of ['D:/p/distro/app.js', 'D:/p/src/build.js', 'D:/p/my-dist/x.js', 'D:/p/builder/a.txt', 'D:/p/src/bin/main.js', 'D:/p/lib/util.js']) {
+  await call(route, 'list', {})
+  const parked = gate(exec('write', { file_path: keeper, content: 'x\n' }), next)
+  await wait(20)
+  const listed = await call(route, 'list', {})
+  check(`noise guard keeps ${keeper}`, listed.value.changes.some((item) => item.path === keeper))
+  await call(route, 'decide', { id: listed.value.changes[0].id, action: 'reject' })
+  await parked
+}
+// The switch exists so the policy can be dropped without editing source.
+const noisy = makeCtx()
+apply(noisy.ctx, { trace: false, skipNoise: false })
+await call(noisy.routes[0], 'list', {})
+const noisyGate = noisy.handlers.get('tools/pre-execute')
+const noisyParked = noisyGate(exec('write', { file_path: 'D:/p/dist/app.js', content: 'x\n' }), next)
+await wait(20)
+const noisyListed = await call(noisy.routes[0], 'list', {})
+check('skipNoise false reviews a build file', noisyListed.value.changes.length === 1)
+await call(noisy.routes[0], 'decide', { id: noisyListed.value.changes[0].id, action: 'reject' })
+check('skipNoise false reject denies', (await noisyParked).kind === 'deny')
+
 /* ---- directory fallbacks ---- */
 const fallback = makeCtx({ dir: 'D:/fallback' })
 apply(fallback.ctx, { trace: false })

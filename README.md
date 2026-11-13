@@ -167,6 +167,7 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 | 5 分钟没人理 | 放行 | 未答复不等于拒绝 |
 | 插件自己的源码 | 放行 | 否则插件坏了就再也修不了（自锁） |
 | 临时目录 / 工作区 `.dsh/` | 放行 | `skipTemp` / `skipScratch`（`.dsh-tmp`、`.dshtmp` 这类只是名字像的不在此列） |
+| 生成物目录（`__pycache__`、`node_modules`、`dist`、`build`、`out`、`target`、`obj`、`coverage`、`.git`、`.venv`、`vendor` 等） | 放行 | `skipNoise`。整段匹配：`dist/` 跳过，`distro/`、`my-dist/`、`builder/` 照问；`bin`/`lib`/`public`/`src` 这类可能有人手写文件的目录**不在名单里** |
 | 二进制 / 超大文件 | 降级为仅统计 | 读不出 UTF-8 时不假装能 diff |
 | 命令写入内容由 shell 决定 | 只碰一个已存在的文件就放行；删除、多目标、`iex`/`node -e` 仍照问 | 看不见的字节问不出答案；但删掉的东西拿不回来 |
 | 一条命令同时碰多个文件 | 降级为仅确认命令 | 文件名本身就是这次审查要确认的东西 |
@@ -212,6 +213,7 @@ dsh plugin add github:wyk4447/dsh-diff-review
     skipTemp: true       # 跳过系统临时目录
     skipScratch: true    # 跳过工作区 .dsh 整个目录
     skipSelf: true       # 跳过插件自身（强烈建议保持 true）
+    skipNoise: true      # 跳过生成物目录（__pycache__/node_modules/dist/.git …）
     trace: true          # 写诊断日志到 ~/.dsh/logs/diff-review.log
     timeoutMs: 300000    # 文件审查超时（毫秒）
     shellTimeoutMs: 120000
