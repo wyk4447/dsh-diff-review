@@ -131,9 +131,10 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 - 只读工具
 - 系统临时目录（`%TEMP%` / `%TMP%` / `/tmp`）
 - 工作区下的 **`.dsh/` 整个目录**（一次性脚本、导出、截图、插件状态都落那儿）
+- **生成物目录**：`__pycache__`、`node_modules`、`dist`、`build`、`out`、`target`、`coverage`、`.venv`、`vendor` 等（工具自己产出的东西，问你也是白问）
 - **插件自己的源码**（否则插件改坏了就再也修不回来）
 
-除此之外，只要落盘就一定会先问你。
+除此之外，只要落盘就一定会先问你。`.git/` 不在豁免之列——`hooks/pre-commit` 下次提交就会执行。
 
 ## 面板细节
 
@@ -158,6 +159,8 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 - **只有文件本身被拿走才照问**：`Remove-Item`、`del`、`rd`、`Rename-Item`、`Move-Item`
 - 同一条命令里「写出临时文件 → 用掉 → 删掉」不算删除（那个文件本来就不存在，删它什么都没丢），整条直接过
 
+它的位置介于 Claude Code 的两个模式之间：比 `acceptEdits`（自动接受编辑、Bash 仍要问）宽一点，命令里的写入也一并放行；比 `bypassPermissions`（什么都不问）窄一点，删除和内容不可知的命令仍然停下来问。文件名和删除是不可逆的，这两件事不问就等于替你答了。
+
 ## 安全阀
 
 | 情形 | 行为 | 原因 |
@@ -167,7 +170,7 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 | 5 分钟没人理 | 放行 | 未答复不等于拒绝 |
 | 插件自己的源码 | 放行 | 否则插件坏了就再也修不了（自锁） |
 | 临时目录 / 工作区 `.dsh/` | 放行 | `skipTemp` / `skipScratch`（`.dsh-tmp`、`.dshtmp` 这类只是名字像的不在此列） |
-| 生成物目录（`__pycache__`、`node_modules`、`dist`、`build`、`out`、`target`、`obj`、`coverage`、`.git`、`.venv`、`vendor` 等） | 放行 | `skipNoise`。整段匹配：`dist/` 跳过，`distro/`、`my-dist/`、`builder/` 照问；`bin`/`lib`/`public`/`src` 这类可能有人手写文件的目录**不在名单里** |
+| 生成物目录（`__pycache__`、`node_modules`、`dist`、`build`、`out`、`target`、`obj`、`coverage`、`.venv`、`vendor` 等） | 放行 | `skipNoise`。整段匹配：`dist/` 跳过，`distro/`、`my-dist/`、`builder/` 照问；`bin`/`lib`/`public`/`src` 这类可能有人手写文件的目录、以及 `.git/`（`hooks/pre-commit` 会在下次提交时执行）**都不在名单里** |
 | 二进制 / 超大文件 | 降级为仅统计 | 读不出 UTF-8 时不假装能 diff |
 | 命令写入内容由 shell 决定 | 只碰一个已存在的文件就放行；删除、多目标、`iex`/`node -e` 仍照问 | 看不见的字节问不出答案；但删掉的东西拿不回来 |
 | 一条命令同时碰多个文件 | 降级为仅确认命令 | 文件名本身就是这次审查要确认的东西 |
