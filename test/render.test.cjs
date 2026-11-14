@@ -21,6 +21,9 @@ const React = {
   useState: (initial) => {
     if (initial === 'unified' && React.forcedView !== null) return [React.forcedView, () => {}]
     if (initial === false && React.forcedHistory === true) return [true, () => {}]
+    // The folded raw command is the same shape of problem: a click the stub
+    // cannot deliver. Forcing the state is how the opened block is rendered.
+    if (initial === false && React.forcedRaw === true) return [true, () => {}]
     if (Array.isArray(initial) && React.forcedList !== null) return [React.forcedList, () => {}]
     return [initial, () => {}]
   },
@@ -39,6 +42,7 @@ const React = {
 }
 React.forcedView = null
 React.forcedHistory = false
+React.forcedRaw = false
 React.forcedList = null
 React.refs = []
 React.scrollers = []
@@ -334,7 +338,9 @@ async function main() {
 
   // 4) a command-level review: the command is all the panel knows, so it must not
   // pretend to draw a diff, must not offer a view toggle that does nothing, and
-  // must say why in its own words instead of "too large".
+  // must say why in its own words instead of "too large". The command itself used
+  // to arrive as one long block of code; it is now broken into the steps it
+  // performs, because "what is this doing?" was the question nobody could answer.
   React.forcedView = 'unified'
   listPayload = {
     ok: true,
@@ -342,7 +348,26 @@ async function main() {
       changes: [
         // `reason` replaces the old blanket `reviewable === false` wording: this one
         // is a shell command whose result the shell decides at run time.
-        { id: 'c2', sessionId: 's1', tool: 'pwsh', displayPath: '$dir\\probe.js', op: 'create', added: 0, removed: 0, oldLineCount: 0, newLineCount: 0, truncated: false, reviewable: false, reason: 'shell-command', command: "Out-File -FilePath $dir\\probe.js -InputObject $js" },
+        {
+          id: 'c2',
+          sessionId: 's1',
+          tool: 'pwsh',
+          displayPath: '$dir\\probe.js',
+          op: 'create',
+          added: 0,
+          removed: 0,
+          oldLineCount: 0,
+          newLineCount: 0,
+          truncated: false,
+          reviewable: false,
+          reason: 'shell-command',
+          command: "cd D:/w; $js = 'x'; Out-File -FilePath $dir\\probe.js -InputObject $js",
+          steps: [
+            { kind: 'cd', text: 'cd D:/w' },
+            { kind: 'note', text: "$js = 'x'" },
+            { kind: 'write', text: 'Out-File -FilePath $dir\\probe.js -InputObject $js', path: '$dir\\probe.js' },
+          ],
+        },
       ],
       diag: null,
     },
@@ -351,7 +376,16 @@ async function main() {
   await poll()
   out = await render()
   if (process.env.DUMP) console.log('COMMAND OUT:', out)
-  if (!out.includes('Out-File -FilePath')) throw new Error('command-level review did not show the command')
+  if (!out.includes('dshr-steps')) throw new Error('command-level review did not list the steps')
+  if (!out.includes('这条命令会做这些事')) throw new Error('command-level review lost the step heading')
+  if (!out.includes('切换目录')) throw new Error('command-level review did not name the directory switch')
+  if (!out.includes('$dir\\probe.js')) throw new Error('command-level review did not name the file being written')
+  // The raw command is one click away, not gone: approving a summary you cannot
+  // check against the original text would be approving something unseen.
+  if (!out.includes('看原命令')) throw new Error('command-level review lost the way back to the raw command')
+  // The raw block is the whole command in one piece; the step list is the readable
+  // form of it, so the two are told apart by the block's own class.
+  if (out.includes('dshr-cmd')) throw new Error('the raw command was shown before it was asked for')
   if (out.includes('dshr-code')) throw new Error('command-level review drew an empty code pane')
   if (out.includes('dshr-stat')) throw new Error('command-level review kept the line statistics')
   // `t()` resolves through the registered dictionary, so the assertion has to use
@@ -360,6 +394,13 @@ async function main() {
   const rightForCommand = '无法预知最终内容'
   if (!out.includes(rightForCommand)) throw new Error('command-level review used the wrong wording')
   if (out.includes(wrongForCommand)) throw new Error('command-level review claimed the change was too large')
+
+  // Opening the folded block has to reveal the exact text being approved.
+  React.forcedRaw = true
+  out = await render()
+  if (!out.includes('Out-File -FilePath')) throw new Error('the raw command stayed hidden after it was asked for')
+  if (!out.includes('收起原命令')) throw new Error('the raw command could not be folded again')
+  React.forcedRaw = false
 
   // The same panel must still word a genuinely oversized change as oversized.
   listPayload.value.changes[0].reason = undefined

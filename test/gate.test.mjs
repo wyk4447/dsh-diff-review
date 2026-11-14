@@ -552,9 +552,77 @@ check('shell set-item shows the new text', setItem.detail.after === 'one')
 await call(route, 'decide', { id: setItem.item.id, action: 'accept' })
 check('shell set-item accept allows', (await setItem.parked).kind === 'allow')
 
-// The wider net must not swallow read-only commands or cmdlets that only build
-// objects in memory: `New-Object`, `Add-Type`, `Clear-Host` and friends share a
-// mutating prefix but never touch a file.
+// An interpreter running source text is judged by that text. A script that loads a
+// file and prints a number touches nothing, and the panel could only have shown the
+// whole command with "the result is not knowable up front" — which is the complaint
+// that started this: thirty lines of code and no way to tell it was a read.
+for (const command of [
+  `node -e "const fs=require('fs');const t=fs.readFileSync('D:/w/a.txt','utf8');console.log(t.length)"`,
+  `node -p "process.version"`,
+  `python -c "print(open('D:/w/a.txt').read().strip())"`,
+  `python -c "import sys;sys.stdout.write('hi')"`,
+  `node -e "console.log('write this to stdout')"`,
+  `node -e "const fs=require('fs');for(const n of fs.readdirSync('D:/w'))console.log(n)"`,
+  `python -c "import csv;print(list(csv.reader(open('D:/w/a.csv'))))"`,
+]) {
+  await call(route, 'list', {})
+  const pending = gate(exec('pwsh', { command }), next)
+  const verdict = await Promise.race([pending.then((out) => out.kind), wait(120).then(() => 'parked')])
+  check(`inline script that only reads is not parked ${command}`, verdict === 'allow')
+  if (verdict !== 'allow') {
+    const listed = await call(route, 'list', {})
+    for (const open of listed.value.changes) await call(route, 'decide', { id: open.id, action: 'reject' })
+    await pending
+  }
+  check(`inline script that only reads leaves nothing pending ${command}`, (await call(route, 'list', {})).value.changes.length === 0)
+}
+
+// The shortcut is withdrawn the moment the text names something that can write, so
+// the ordinary ways a script produces a file still stop for review.
+for (const command of [
+  `node -e "require('fs').writeFileSync('D:/w/a.txt','x')"`,
+  `node -e "const fs=require('fs');fs.appendFileSync('D:/w/b.txt','x')"`,
+  `node -e "require('fs').promises.unlink('D:/w/a.txt')"`,
+  `python -c "open('D:/w/a.txt','w').write('x')"`,
+  `python -c "import shutil;shutil.copy('D:/w/a.txt','D:/w/b.txt')"`,
+  `python -c "import os;os.replace('D:/w/a.txt','D:/w/b.txt')"`,
+  `node -e "require('child_process').execSync('del D:/w/a.txt')"`,
+  `node -e "eval(payload)"`,
+]) {
+  const parked = await parkShell(command)
+  check(`inline script that writes parks ${command}`, parked.item !== undefined)
+  check(`inline script that writes says it is unknowable ${command}`, parked.item !== undefined && parked.item.reason === 'shell-command')
+  await call(route, 'decide', { id: parked.item.id, action: 'accept' })
+  await parked.parked
+}
+
+// One writing script anywhere in the command withdraws the shortcut for the whole
+// command: clearing only the statements that happened to be read-only would let the
+// second half through unexamined.
+{
+  const mixed = 'node -e "console.log(1)"; node -e "require(`fs`).mkdirSync(`D:/w/newdir`)"'
+  const parked = await parkShell(mixed)
+  check('a read-only script next to a writing one still parks', parked.item !== undefined)
+  await call(route, 'decide', { id: parked.item.id, action: 'accept' })
+  await parked.parked
+}
+
+// The exact command that started this: read a YAML file, print two lengths. It was
+// shown as thirty lines of one-liner with "the result is not knowable up front".
+{
+  const command = "$env:DSH_PERMISSION_MODE='danger-full-access'; $d='D:/w/data'; cd $d; "
+    + `node -e "const yaml=require('js-yaml');const fs=require('fs');const t=fs.readFileSync('a.yml','utf8');const o=yaml.load(t);console.log('EN len',o.description.en.length);" 2>&1`
+  await call(route, 'list', {})
+  const verdict = gate(exec('pwsh', { command }), next)
+  const kind = await Promise.race([verdict.then((out) => out.kind), wait(120).then(() => 'parked')])
+  check('the report script that started this is not parked', kind === 'allow')
+  if (kind !== 'allow') {
+    for (const open of (await call(route, 'list', {})).value.changes) await call(route, 'decide', { id: open.id, action: 'reject' })
+    await verdict
+  }
+  check('the report script that started this leaves nothing pending', (await call(route, 'list', {})).value.changes.length === 0)
+}
+
 for (const harmless of [
   'Get-ChildItem D:/w',
   "Select-String 'x' D:/w/a.txt",

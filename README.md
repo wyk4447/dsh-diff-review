@@ -140,13 +140,26 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 
 一个已知文件、内容看不见的写入（`Set-Content -Value $x`、`$js > file`）**直接放行** —— 让人审批自己看不见的字节是问不出答案的噪音。
 
-真要弹时，面板给完整命令行并明说「命令操作，无法预知最终内容」，**不会**假装列出被删的文件，也**不会**把这种情况说成「改动过大」。
+真要弹时，面板先给「这条命令会做这些事」的步骤清单（`切换目录` / `设置` / `写入 <文件>` / `删除 <文件>` / `交给别的程序`），原命令折在下面点一下就展开 —— 不再是把三十行单行命令整条甩给你读。
 
 两个例外：
 
 - **`$env:NAME` 能查**：`Remove-Item "$env:TEMP\a.txt"` 会还原成真实路径 —— 落在临时目录的照放行，落在别处的照常问
 - **逗号并列多目标**（`Remove-Item 'a.txt','b.txt'`）各自独立解析
 - 文件名里本来就有的 `$`（如 `a$b.txt`）不算展开，仍按真实路径审查
+
+### 内联脚本先看它写了什么
+
+`node -e`、`python -c`、`py -3 -c` 这类把源码写在命令行里的调用，**先判断这段源码会不会写盘**：
+
+- 只读（读文件、打印、算长度、`readdir`、读 csv）→ **直接放行**，不再弹面板
+- 出现写盘调用（`writeFileSync`、`appendFileSync`、`unlink`、`mkdirSync`、`shutil.copy`、`os.replace`、`to_csv`、`savefig`…）→ 照常弹，并给出步骤清单
+- 出现以写模式打开的 `open(..., 'w')`、`(..., 'a')`、`(..., 'x')`、`(..., 'r+')` → 照常弹
+- 出现能把控制权交给别的程序的东西（`child_process`、`execSync`、`spawn`、`eval`）→ 撤销只读判断，照常弹
+
+`cmd /c del x`、`bash -c 'rm …'` **不**走这条判断：它们的 payload 是 shell，用一份 JS/Python 词表去判会把没列进词表的删除当成无害。这两种仍然整条确认。
+
+一段源码只要有一处说不清，整条命令就照常弹 —— 放行的门槛是「整条命令的每个内联脚本都被判定为只读」。
 
 ## 什么不会拦
 
@@ -284,9 +297,9 @@ node test\history.test.mjs  # 快照库：去重 / 上限回收 / 跨对话隔�
 > 闸门与快照测试都把存储根指到系统临时目录（`DSH_DIFF_REVIEW_HISTORY_ROOT`）并在结束时删掉，跑测试不会往你的 `~/.dsh` 里塞任何东西。
 
 <details>
-<summary><b>闸门测试覆盖的 301 项断言</b>（点开）</summary>
+<summary><b>闸门测试覆盖的 334 项断言</b>（点开）</summary>
 
-`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建四种）、同一命令里赋值后写出的变量（`$t = 'one'; Set-Content -Value $t`、反引号转义还原、`$p = 'D:/w/a.txt'; Remove-Item $p` 解析成真实文件、`$dir` 参与路径拼接、`"hello $n"` 插值）、运行期才算出来的值不再弹（`$t = 'a' + 'b'`、`$env:USERNAME`、`$js > a.txt`）、按形状识别的改写命令（`Set-Item`/`Rename-Item`/`New-Item`/`Tee-Object`/`Export-Csv`/`[IO.File]::Delete`/`cmd /c del`/`iex`/`Invoke-Expression`/`node -e`/`python -c`/`powershell -EncodedCommand`/`git clean`/`git checkout --`/管道右端无目标）且参数是字面量时仍出真 diff、形状命中但没有文件名的条目（`iex`/`git clean`/管道右端）标记为命令级且不带路径（`op === 'shell'`、`displayPath` 为空，避免把动词当成文件名）、只碰一个已知文件且内容看不见的写入放行、`-WhatIf`/`Get-ChildItem`/`Write-Host`/`New-Object`/`Add-Type`/`Clear-Host`/`git status`/`node --version` 放行、通配与变量目标的命令级确认（`$p`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、脚本块里的删除（`if (...) { ... }`、`foreach (...) { ... }`、`& { ... }`）、同一命令内赋值参与路径解析、逗号并列多个目标、同一文件被写两次时顶栏只出现一次而两个不同文件按顺序都出现、`$env:TEMP` 目标按临时目录放行、自我豁免、临时目录豁免、工作区 `.dsh/` 整个目录豁免且不误豁免 `.dsh-tmp`/`.dshtmp`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起、**全部允许**（同一轮里后续写入直接放行且诊断记为 `allow-all`、文件被删除或改名仍照问而 `Clear-Content` 直接过、`turn/end` 与新一轮提问都不动这个开关、关掉开关不需要有待审项、关掉之后的下一次写入重新挂起、**按对话记**——开在一个对话上不会放行另一个、关掉一个不会动另一个、不带对话的开关请求被拒绝 `missing`）、同一条命令里写出来又删掉的临时文件直接放行而删掉一个本来就存在的文件仍照问、**一个对话的改动不会被另一个对话看到或决定**（`list` 只回本会话、`detail`/`decide` 对别的会话返回 `missing` 且记录仍挂着）、**还原链路**（接受过的写入出现在历史里且带 `accepted` 状态与可用快照、还原后文件回到原文、第二次还原被拒 `already-restored`、文件在审查之后又被改过则拒绝还原 `stale` 且新内容保留、已拒绝的改动不给还原 `not-applied`、删除可以还原且字节真的回来了、别的对话既看不到这些历史也还原不了、不存在的 id 返回 `missing`）、**多文件审查**（一条命令碰两个文件只挂起一次、`files` 里两条、`detail.files` 各带自己的 rows 与新文与路径、接受后放行）、**二进制**（`.png` 被识别成 `binary`、不给行数、报 `0 → 1` 字节、`reviewable` 为真、不说「无法预知」、接受后放行）、**纯格式与纯换行**（重新缩进标 `note === 'formatting'`、CRLF 重写标 `note === 'line-endings'`，两种都仍可接受）、**按参数判定**（`mcp__fs__write_file` 被拦且新文能出 diff、`mcp__fs__read_file` 放行、`grep({pattern: 'write'})` 放行、`write_log({level, message})` 无路径放行）。
+`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建四种）、同一命令里赋值后写出的变量（`$t = 'one'; Set-Content -Value $t`、反引号转义还原、`$p = 'D:/w/a.txt'; Remove-Item $p` 解析成真实文件、`$dir` 参与路径拼接、`"hello $n"` 插值）、运行期才算出来的值不再弹（`$t = 'a' + 'b'`、`$env:USERNAME`、`$js > a.txt`）、按形状识别的改写命令（`Set-Item`/`Rename-Item`/`New-Item`/`Tee-Object`/`Export-Csv`/`[IO.File]::Delete`/`cmd /c del`/`iex`/`Invoke-Expression`/`node -e`/`python -c`/`powershell -EncodedCommand`/`git clean`/`git checkout --`/管道右端无目标）且参数是字面量时仍出真 diff、形状命中但没有文件名的条目（`iex`/`git clean`/管道右端）标记为命令级且不带路径（`op === 'shell'`、`displayPath` 为空，避免把动词当成文件名）、只碰一个已知文件且内容看不见的写入放行、`-WhatIf`/`Get-ChildItem`/`Write-Host`/`New-Object`/`Add-Type`/`Clear-Host`/`git status`/`node --version` 放行、通配与变量目标的命令级确认（`$p`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、脚本块里的删除（`if (...) { ... }`、`foreach (...) { ... }`、`& { ... }`）、同一命令内赋值参与路径解析、逗号并列多个目标、同一文件被写两次时顶栏只出现一次而两个不同文件按顺序都出现、`$env:TEMP` 目标按临时目录放行、自我豁免、临时目录豁免、工作区 `.dsh/` 整个目录豁免且不误豁免 `.dsh-tmp`/`.dshtmp`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起、**全部允许**（同一轮里后续写入直接放行且诊断记为 `allow-all`、文件被删除或改名仍照问而 `Clear-Content` 直接过、`turn/end` 与新一轮提问都不动这个开关、关掉开关不需要有待审项、关掉之后的下一次写入重新挂起、**按对话记**——开在一个对话上不会放行另一个、关掉一个不会动另一个、不带对话的开关请求被拒绝 `missing`）、同一条命令里写出来又删掉的临时文件直接放行而删掉一个本来就存在的文件仍照问、**一个对话的改动不会被另一个对话看到或决定**（`list` 只回本会话、`detail`/`decide` 对别的会话返回 `missing` 且记录仍挂着）、**还原链路**（接受过的写入出现在历史里且带 `accepted` 状态与可用快照、还原后文件回到原文、第二次还原被拒 `already-restored`、文件在审查之后又被改过则拒绝还原 `stale` 且新内容保留、已拒绝的改动不给还原 `not-applied`、删除可以还原且字节真的回来了、别的对话既看不到这些历史也还原不了、不存在的 id 返回 `missing`）、**多文件审查**（一条命令碰两个文件只挂起一次、`files` 里两条、`detail.files` 各带自己的 rows 与新文与路径、接受后放行）、**二进制**（`.png` 被识别成 `binary`、不给行数、报 `0 → 1` 字节、`reviewable` 为真、不说「无法预知」、接受后放行）、**纯格式与纯换行**（重新缩进标 `note === 'formatting'`、CRLF 重写标 `note === 'line-endings'`，两种都仍可接受）、**按参数判定**（`mcp__fs__write_file` 被拦且新文能出 diff、`mcp__fs__read_file` 放行、`grep({pattern: 'write'})` 放行、`write_log({level, message})` 无路径放行）、**内联脚本只读识别**（`node -e` 读文件打印长度、`node -p process.version`、`python -c` 读文件打印、`sys.stdout.write` 打印、`console.log('write this to stdout')`、`readdirSync` 列表、`csv.reader` 读表共七种放行；`writeFileSync`、`appendFileSync`、`promises.unlink`、`open(...,'w')`、`shutil.copy`、`os.replace`、`child_process.execSync`、`eval(payload)` 共八种照常挂起并标 `shell-command`；一条只读脚本配一条写入脚本时整条仍挂起；**当初引发这次改动的「读 YAML 打印两个长度」那条命令不再挂起**）。
 
 </details>
 
@@ -295,7 +308,7 @@ node test\history.test.mjs  # 快照库：去重 / 上限回收 / 跨对话隔�
 
 用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch，共 10 组：`empty diag`、`unified + full`、`multi-file review`、`scroll sync`、`command-level review`、`allow-all-switch`、`session-scoped title`、`guide artwork`、历史屏幕、`client render smoke`。
 
-具体验证：空态六行诊断（最后一行「轮次」，宿主一次都没报过轮次时显示 `-`）、改动视图有 `+`/`-` 标记、改写行只有真正变化的那几个字被加深高亮（前缀不被误涂）、全文视图有双栏与 gutter 竖条、**拖动一侧另一侧同步且不回弹**、**多文件时上面出现文件条并写「2 个文件」、列出两个文件名、默认画第一个文件的 diff、二进制那格报字节数而不是「该文件内容未变」**、删除态第二栏显示「文件将被删除」、命令级审查不出空代码区且用「无法预知最终内容」而不是「改动过大」、命令级条目不再编造文件名（`iex $code` 的面板不显示任何文件名）、「全部允许」开关始终在顶栏、**放行之后队列清空的那一屏也仍然在**、**一个对话的开关状态不会串到另一个对话**、关掉后仍能找到入口、**标签页计数只算本对话**、侧栏「开始」页的画走 `guide` 条目自己的 `icon`（不是清单里的 `icon.svg`）、**历史屏幕在有记录时列出条目并标「已还原」、且只给唯一一条可还原的条目出「还原」按钮（已还原的、已拒绝的、快照不完整的都不出）**。
+具体验证：空态六行诊断（最后一行「轮次」，宿主一次都没报过轮次时显示 `-`）、改动视图有 `+`/`-` 标记、改写行只有真正变化的那几个字被加深高亮（前缀不被误涂）、全文视图有双栏与 gutter 竖条、**拖动一侧另一侧同步且不回弹**、**多文件时上面出现文件条并写「2 个文件」、列出两个文件名、默认画第一个文件的 diff、二进制那格报字节数而不是「该文件内容未变」**、删除态第二栏显示「文件将被删除」、命令级审查不出空代码区且用「无法预知最终内容」而不是「改动过大」、**命令级审查先给步骤清单（`切换目录`、`设置`、`写入` 三行，并单独点出目标文件）、原命令默认折叠、点开后才显示原文并能再收起**、命令级条目不再编造文件名（`iex $code` 的面板不显示任何文件名）、「全部允许」开关始终在顶栏、**放行之后队列清空的那一屏也仍然在**、**一个对话的开关状态不会串到另一个对话**、关掉后仍能找到入口、**标签页计数只算本对话**、侧栏「开始」页的画走 `guide` 条目自己的 `icon`（不是清单里的 `icon.svg`）、**历史屏幕在有记录时列出条目并标「已还原」、且只给唯一一条可还原的条目出「还原」按钮（已还原的、已拒绝的、快照不完整的都不出）**。
 
 `test/history.test.mjs` 直接测快照库本身：记录被拒的条件（无会话 / 无路径 / 多目标命令 / 内容不可知的命令 / **命令级条目** / **未知操作名**）、截断的快照只留记录不可还原、删除按「文件应当不存在」校验、新建可撤销、关闭开关后全静默、跨对话隔离、**会话 id 带 `../` 不会逃出存储根**、最新在前、内容寻址只存一份 blob、超 200 条从最旧开始删且回收孤儿 blob、索引损坏读成空且之后仍能写入、`forget` 幂等、超 2MB 的快照记条目但不可还原。
 
@@ -341,6 +354,7 @@ Select-String -Path ~\.dsh\logs\diff-review.log -Pattern '"tool":"write"'
 | `temp-skipped` / `scratch-skipped` / `self-skipped` / `noise-skipped` | 命中临时目录 / 工作区 `.dsh/` / 插件自身 / 生成物目录豁免 |
 | `identical` / `edit-no-match` / `edit-ambiguous` | 改动本身无效或歧义，交给宿主自己报错 |
 | `shell-not-destructive` | `pwsh` 命令不含破坏性操作 |
+| `script-read-only` | 命令里是 `node -e` / `python -c` 这类内联脚本，且每段源码都只读（不写盘、不以写模式 `open`、不启动别的程序） |
 | `intent-skipped` / `intent-error` | 看着像在改文件，但路径落不到存在的文件上 / 读路径时出错 |
 
 ## 实现要点
@@ -349,6 +363,8 @@ Select-String -Path ~\.dsh\logs\diff-review.log -Pattern '"tool":"write"'
 - **拦谁**：不靠工具名白名单。`write`/`edit`/`pwsh` 是精确 diff 的已知工具，其余一律按参数判定——工具名或 `op`/`action`/`type` 参数里出现变异动词，**且**参数里有真实路径，两者同时成立才拦。这样第三方 MCP 文件服务也能被拦，而 `grep({pattern: "write"})` 不会被误拦。
 - **多文件**：一条命令按路径分组，每组独立 replay 出 before/after，`files[]` 随 `list` 只发摘要、随 `detail` 发全部 rows。面板切文件是本地状态，不发请求。
 - **二进制 / 格式噪音**：扩展名先判 `kind`（`text`/`binary`/`sourcemap`），二进制只算字节数不读文本；文本再判 `note`（`line-endings`/`formatting`）。`computed`（有真 diff）与 `understood`（知道结果，哪怕只是字节数）分开，只有前者能驱动快照——二进制没有文本副本，所以永远不给还原。
+- **内联脚本**：`node`/`python` 带 `-e`/`-c` 时先取 payload 原文，抹掉字符串字面量与 `console.log`/`process.stdout.write`（打印不是写盘），再把标识符去掉下划线后比对写词表；`open` 的写模式靠正则带调用括号判，避免只读脚本被拦。任何一处判不清就整条照常确认，`cmd /c`、`bash -c` 不走这条捷径。
+- **步骤清单**：算不出 diff 的命令在服务端就按语句拆成 `steps[]`（`cd`/`note`/`write`/`delete`/`run`/`opaque`），随 `list` 一起透出。面板先画清单、原命令折叠；没有清单时原命令直接展开，不会出现「藏起来的唯一审查内容」。
 - **通道**：自建同源 HTTP 路由 `/diff-review/api/{list,detail,decide,history,restore}`，前面挂 `ctx.connection.requestRejection` 做浏览器信任校验。Electron 壳把 `dsh-app://app/` 的请求转发到 Host 并自动带认证 cookie，所以浏览器侧同源可达；从 Node 直接探测会 403，属正常。
 - **diff**：自己算 LCS（`Int32Array` DP，超 400 万格降级为全删全增），零外部依赖。
 - **布防**：侧边栏每 1.2s 轮询 `list`，该调用同时刷新心跳；心跳 180s 内有效才算「布防」，否则一律放行。窗口不可见时 Chromium 把 `setInterval` 压到约 60s 一跳，窗口必须留得比这个大，否则切走窗口就等于放行。
