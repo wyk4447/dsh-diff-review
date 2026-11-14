@@ -554,6 +554,7 @@ async function main() {
         { id: 'h2', path: 'D:/w/gone.js', op: 'delete', state: 'accepted', restorable: true, verify: { kind: 'absent' }, restoredAt: 1 },
         { id: 'h3', path: 'D:/w/refused.js', op: 'update', state: 'rejected', restorable: true, verify: { kind: 'sha', sha: 'bb' }, restoredAt: null },
         { id: 'h4', path: 'D:/w/big.js', op: 'update', state: 'accepted', restorable: false, verify: null, restoredAt: null },
+        { id: 'h5', path: 'D:/w/waved.js', op: 'update', state: 'allowed', restorable: true, verify: { kind: 'sha', sha: 'cc' }, restoredAt: null },
       ],
     },
   }
@@ -568,11 +569,15 @@ async function main() {
   if (process.env.DUMP) console.log('HISTORY OUT:', out)
   if (!out.includes('accepted.js')) throw new Error('the history screen did not list a reviewed change')
   if (!out.includes('已还原')) throw new Error('the history screen did not mark an already-restored entry')
-  // Exactly one undo button: the restored entry, the rejected one (never reached
-  // the disk) and the truncated one (no trustworthy bytes) must not offer one.
+  // A change the switch waved through is offered an undo too, and labelled for
+  // what it was: nobody read it, so the list must not call it accepted.
+  if (!out.includes('开关放行')) throw new Error('the history screen did not label an unreviewed change')
+  // Exactly two undo buttons now: the accepted one and the waved-through one. The
+  // restored entry, the rejected one (never reached the disk) and the truncated
+  // one (no trustworthy bytes) must not offer one.
   if ((out.match(/<dshr-btn>/g) || []).length === 0) throw new Error('the history screen offered no undo at all')
   const undoButtons = out.split('<dshr-btn>').filter((chunk) => chunk.startsWith('还原'))
-  if (undoButtons.length !== 1) throw new Error(`the history screen offered ${undoButtons.length} undos, expected 1`)
+  if (undoButtons.length !== 2) throw new Error(`the history screen offered ${undoButtons.length} undos, expected 2`)
   if (out.includes('本会话还没有审查记录')) throw new Error('the history screen showed its empty hint with entries present')
   React.forcedHistory = false
   React.forcedList = null

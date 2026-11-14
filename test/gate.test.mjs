@@ -903,6 +903,22 @@ check('a new request leaves the switch alone', nextTurn.value.allowAll.s1 === tr
 const parkedNextTurn = await gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\nthree\ngamma\ndelta\n' }), next)
 check('a write after the next request still passes', parkedNextTurn.kind === 'allow')
 
+// The switch stops the interruption, not the memory. A write it waved through is
+// still recorded with the bytes it replaced, so a reader who later realises what
+// went past can take it back — and the entry says plainly that no one read it.
+const allowedParked = await gate(exec('write', { file_path: 'D:/w/allowed.txt', content: 'alpha\nbeta\ngamma\nALLOWED\n' }), next)
+check('a write under the switch does not park', allowedParked.kind === 'allow')
+const allowedHistory = await call(route, 'history', { sessionId: 's1' })
+const allowedEntry = allowedHistory.value.entries.find((entry) => entry.path === 'D:/w/allowed.txt')
+check('a write the switch waved through is kept in the history', allowedEntry !== undefined)
+check('the entry says no one read it', allowedEntry !== undefined && allowedEntry.state === 'allowed')
+check('the entry still offers an undo', allowedEntry !== undefined && allowedEntry.restorable === true && allowedEntry.verify !== null)
+// The fake host does not perform writes, so the tool's effect is applied here.
+files.set('D:/w/allowed.txt', 'alpha\nbeta\ngamma\nALLOWED\n')
+const allowedUndo = await call(route, 'restore', { id: allowedEntry.id, sessionId: 's1' })
+check('an entry the switch waved through can be taken back', allowedUndo.value.ok === true)
+check('the previous text comes back', currentText('D:/w/allowed.txt') === DEFAULT_TEXT)
+
 // Turning it off needs no pending change: it has to work from the empty panel,
 // which is exactly where a reader lands right after allowing everything.
 const switchedOff = await call(route, 'decide', { action: 'setAllowAll', value: false, sessionId: 's1' })

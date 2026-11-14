@@ -117,6 +117,17 @@ ok('a record with an invented operation is not history', record({ id: 'c14', op:
 
 /* ------------------------------------------------------------------ switch -- */
 
+// The manual switch waves a change through, but it still reached the disk. The
+// entry must say "allowed" rather than "accepted": no one read it, and a list
+// that calls it accepted would be claiming a review that never happened.
+const waved = record({ id: 'c30', path: 'D:\\work\\waved.txt' })
+ok('a record exists before the switch settles it', waved !== undefined && waved.state === 'pending')
+store.settle('session-a', 'c30', 'allow')
+const wavedRead = store.read('session-a', 'c30').entry
+ok('a change the switch waved through is marked allowed', wavedRead.state === 'allowed')
+ok('a waved-through change keeps its snapshot', wavedRead.restorable === true)
+ok('a waved-through change can still be undone', wavedRead.verify !== null && wavedRead.verify.kind === 'sha')
+
 enabled.value = false
 ok('a disabled store records nothing', record({ id: 'c20' }) === undefined)
 ok('a disabled store lists nothing', store.list('session-a').length === 0)
