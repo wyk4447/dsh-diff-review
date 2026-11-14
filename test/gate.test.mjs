@@ -544,6 +544,91 @@ check('shell dotnet delete shows the old text', dotnetDelete.detail.before.inclu
 await call(route, 'decide', { id: dotnetDelete.item.id, action: 'accept' })
 check('shell dotnet delete accept allows', (await dotnetDelete.parked).kind === 'allow')
 
+// The member name alone is not the signal: it has to come from a type that can
+// reach the disk. `[SHA256]::Create()` shares its name with `[File]::Create(path)`
+// and builds a hash object in memory, and stopping the reviewer over it — with no
+// diff to show, only the command text — was a report of its own.
+for (const command of [
+  '[System.Security.Cryptography.SHA256]::Create()',
+  '$sha=[System.Security.Cryptography.SHA256]::Create(); $sha.ComputeHash($b)',
+  "$b=[System.IO.File]::ReadAllBytes('D:/w/a.txt'); [System.Text.Encoding]::UTF8.GetString($b)",
+  '[System.IO.Path]::GetFileName($p)',
+]) {
+  await call(route, 'list', {})
+  const memoryOnly = gate(exec('pwsh', { command }), next)
+  const verdict = await Promise.race([memoryOnly.then((out) => out.kind), wait(120).then(() => 'parked')])
+  check(`an in-memory .NET call is not parked ${command}`, verdict === 'allow')
+  if (verdict !== 'allow') {
+    for (const open of (await call(route, 'list', {})).value.changes) await call(route, 'decide', { id: open.id, action: 'reject' })
+    await memoryOnly
+  }
+}
+// ...and the disk types are still caught: when the path is an expression rather
+// than a literal, the owning type is the only thing left to judge by, and a call
+// that reaches the disk must not be cleared for lacking a readable path.
+{
+  const variablePath = await parkShell("[System.IO.File]::WriteAllText($p, 'body')")
+  check('a disk member with an expression path still parks', variablePath.item !== undefined)
+  if (variablePath.item !== undefined) {
+    await call(route, 'decide', { id: variablePath.item.id, action: 'accept' })
+    await variablePath.parked
+  }
+}
+
+// The command that was reported: hash a file and print the digest. Every call in it
+// either reads bytes or works on an object in memory, so there is nothing to review
+// and the panel never had anything to show for it.
+{
+  const command = "$f='D:/w/a.txt'; $b=[System.IO.File]::ReadAllBytes($f); "
+    + "$sha=[System.Security.Cryptography.SHA256]::Create(); "
+    + "$h=($sha.ComputeHash($b) | ForEach-Object { $_.ToString('x2') }) -join ''; $h"
+  await call(route, 'list', {})
+  const hashing = gate(exec('pwsh', { command }), next)
+  const verdict = await Promise.race([hashing.then((out) => out.kind), wait(120).then(() => 'parked')])
+  check('the reported hashing command is not parked', verdict === 'allow')
+  if (verdict !== 'allow') {
+    for (const open of (await call(route, 'list', {})).value.changes) await call(route, 'decide', { id: open.id, action: 'reject' })
+    await hashing
+  }
+  check('the hashing command leaves nothing pending', (await call(route, 'list', {})).value.changes.length === 0)
+}
+
+/* ---- command steps ---- */
+// The command block is broken into the steps the command performs. `splitStatements`
+// breaks at `|`, `&`, `{` and `}`, which is right for the gate but wrong for reading:
+// one pipeline expression came out as four "steps", each a fragment of an expression
+// that meant nothing on its own. Fragments that do not balance are now folded into
+// the statement that completes them.
+{
+  const command = "$h=(Get-ChildItem 'D:/w' | ForEach-Object { $_.Name }) -join ''; "
+    + '$h; Remove-Item -LiteralPath $p -Force'
+  const parked = await parkShell(command)
+  check('the pipeline script parks', parked.item !== undefined)
+  const steps = parked.item !== undefined ? parked.item.steps : undefined
+  check('the command block carries steps', Array.isArray(steps) && steps.length > 0)
+  const texts = Array.isArray(steps) ? steps.map((step) => String(step.text ?? '')) : []
+  // Nothing may end in the middle of a parenthesis: every step has to balance, or
+  // it is a fragment rather than a step.
+  const balanced = (text) => {
+    let depth = 0
+    for (const ch of text) {
+      if (ch === '(' || ch === '[') depth += 1
+      else if (ch === ')' || ch === ']') depth -= 1
+    }
+    return depth === 0
+  }
+  check('every step is a whole statement', texts.every(balanced))
+  check(
+    'the pipeline is one step',
+    texts.some((text) => text.includes('ForEach-Object') && text.includes('Get-ChildItem') && text.includes('-join')),
+  )
+  check('no step is a bare closing bracket', texts.every((text) => text.replace(/[{}()\[\]]/g, '').trim() !== ''))
+  if (parked.item !== undefined) {
+    await call(route, 'decide', { id: parked.item.id, action: 'accept' })
+    await parked.parked
+  }
+}
+
 // `Set-Item` is a known write cmdlet with a literal path and value, so the same
 // diff machinery applies rather than a bare command block.
 const setItem = await parkShell("Set-Item -Path 'D:/w/a.txt' -Value 'one'")
