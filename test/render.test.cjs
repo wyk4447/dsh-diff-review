@@ -255,6 +255,59 @@ async function main() {
   }
   console.log('unified + full: OK')
 
+  // 2b) a command touching several files: one decision, one diff per file. The
+  // strip is the whole point — without it the panel would have to pick a single
+  // file to draw and silently hide the rest.
+  React.forcedView = 'unified'
+  listPayload = {
+    ok: true,
+    value: {
+      changes: [
+        {
+          id: 'c9',
+          sessionId: 's1',
+          tool: 'pwsh',
+          displayPath: 'D:/w/one.txt, D:/w/two.txt',
+          op: 'update',
+          added: 0,
+          removed: 0,
+          oldLineCount: 0,
+          newLineCount: 0,
+          truncated: false,
+          reviewable: true,
+          files: [
+            { path: 'D:/w/one.txt', op: 'update', kind: 'text', computed: true, truncated: false, added: 1, removed: 1, oldLineCount: 1, newLineCount: 1 },
+            { path: 'D:/w/two.txt', op: 'create', kind: 'binary', computed: false, truncated: false, added: 0, removed: 0, oldLineCount: 0, newLineCount: 0, bytesBefore: 0, bytesAfter: 64 },
+          ],
+        },
+      ],
+      diag: null,
+    },
+  }
+  detailPayload = {
+    ok: true,
+    value: {
+      change: { id: 'c9' },
+      files: [
+        { path: 'D:/w/one.txt', op: 'update', kind: 'text', computed: true, truncated: false, added: 1, removed: 1, oldLineCount: 1, newLineCount: 1, before: 'one\n', after: 'uno\n', rows: [{ t: 'del', a: 1, b: null, text: 'one' }, { t: 'add', a: null, b: 1, text: 'uno' }] },
+        { path: 'D:/w/two.txt', op: 'create', kind: 'binary', computed: false, truncated: false, added: 0, removed: 0, oldLineCount: 0, newLineCount: 0, bytesBefore: 0, bytesAfter: 64, before: '', after: '', rows: [] },
+      ],
+    },
+  }
+  await poll()
+  out = await render()
+  if (process.env.DUMP) console.log('MULTI OUT:', out)
+  if (!out.includes('dshr-files')) throw new Error('a multi-file review drew no file strip')
+  if (!out.includes('2 个文件')) throw new Error('the strip did not count the files')
+  if (!out.includes('one.txt') || !out.includes('two.txt')) throw new Error('the strip did not list both files')
+  // The first file is the one on screen, so its diff must be the one drawn.
+  if (!out.includes('uno')) throw new Error('the first file lost its diff')
+  if (out.includes('该文件内容未变')) throw new Error('a file in the strip was reported as unchanged')
+  // A binary file has no lines, so its row must report bytes — not the "content
+  // did not change" wording, which is the opposite of why it is listed.
+  if (!out.includes('0 → 64 B')) throw new Error('a binary file in the strip did not report its bytes')
+  console.log('multi-file review: OK')
+
   // 3) the two full-text panes share one scroll position
   React.forcedView = 'full'
   React.scrollers.length = 0

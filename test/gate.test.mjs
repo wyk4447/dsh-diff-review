@@ -36,10 +36,12 @@ function makeCtx({ dir = 'D:/w', absent = false, throwOnGet = false } = {}) {
     fs: {
       resolve: async (p) => ({ targetKey: p, displayPath: p }),
       // `fresh.txt` does not exist in this fake workspace: that is what makes the
-      // creation path distinguishable from an overwrite.
+      // creation path distinguishable from an overwrite. `size` is real, because a
+      // binary file is reported by size alone and a fake without it would let the
+      // byte-count path pass while reporting 0 → 0.
       stat: async (target) => (String(target.targetKey).includes('fresh.txt') || files.get(String(target.targetKey)) === null
         ? undefined
-        : { version: 'v1', type: 'file' }),
+        : { version: 'v1', type: 'file', size: Buffer.byteLength(currentText(String(target.targetKey)), 'utf8') }),
       readText: async (target) => currentText(String(target.targetKey)),
       writeText: async (target, content) => {
         writes.push({ key: String(target.targetKey), content })
@@ -209,7 +211,9 @@ const twiceSame = await parkShell([
   "Set-Content -Path 'D:/w/a.txt' -Value 'body'",
 ].join('\n'))
 check('shell duplicate target still parks', twiceSame.item !== undefined)
-check('shell duplicate target keeps both ops', twiceSame.item !== undefined && twiceSame.item.targets.length === 2)
+// `targets` now names files, not operations: the two writes to one file are one
+// target carrying both operations inside its own diff.
+check('shell duplicate target keeps one entry', twiceSame.item !== undefined && twiceSame.item.targets.length === 1)
 check('shell duplicate target names the file once', twiceSame.item !== undefined && twiceSame.item.displayPath === 'D:/w/a.txt')
 await call(route, 'decide', { id: twiceSame.item.id, action: 'accept' })
 check('shell duplicate target accept allows', (await twiceSame.parked).kind === 'allow')
@@ -949,6 +953,91 @@ const foreignUndo = await call(route, 'restore', { id: staleId, sessionId: 's2' 
 check('another conversation cannot undo them', foreignUndo.value.missing === true)
 const unknownUndo = await call(route, 'restore', { id: 'no-such-change', sessionId: 's1' })
 check('an unknown change cannot be undone', unknownUndo.value.missing === true)
+
+/* ---- multi-file review ---- */
+// One command touching two files is one decision with two diffs. It used to fall
+// back to "the result is not knowable" for the whole call, which made a
+// two-statement script unreadable even though both outcomes were literals.
+await call(route, 'list', {})
+const multiCommand = [
+  "Set-Content -Path 'D:/w/m1.txt' -Value 'one'",
+  "Set-Content -Path 'D:/w/m2.txt' -Value 'two'",
+].join('\n')
+const multiParked = gate(exec('pwsh', { command: multiCommand }), next)
+await wait(30)
+const multiListed = await call(route, 'list', {})
+const multiItem = multiListed.value.changes[0]
+check('a command touching two files parks once', multiListed.value.changes.length === 1)
+check('a two-file command lists both files', multiItem !== undefined && multiItem.files !== undefined && multiItem.files.length === 2)
+const multiDetail = multiItem === undefined ? { value: {} } : (await call(route, 'detail', { id: multiItem.id })).value
+check('a two-file command carries one diff per file', Array.isArray(multiDetail.files) && multiDetail.files.length === 2)
+check('each file has its own rows', Array.isArray(multiDetail.files) && multiDetail.files.every((file) => file.computed === true && file.rows.length > 0))
+check('each file carries its own new text', Array.isArray(multiDetail.files) && multiDetail.files[1].after === 'two')
+check('each file names its own path', Array.isArray(multiDetail.files) && multiDetail.files[0].path === 'D:/w/m1.txt' && multiDetail.files[1].path === 'D:/w/m2.txt')
+await call(route, 'decide', { id: multiItem.id, action: 'accept' })
+check('a two-file command accept allows', (await multiParked).kind === 'allow')
+
+/* ---- binary and contentless changes ---- */
+// A binary file has no lines: reading it as UTF-8 would only show replacement
+// characters, so the review is the size. It still has to be reviewable, or the
+// panel would refuse to show the one fact that matters.
+await call(route, 'list', {})
+const binaryParked = gate(exec('pwsh', { command: "Set-Content -Path 'D:/w/logo.png' -Value 'x'" }), next)
+await wait(30)
+const binaryListed = await call(route, 'list', {})
+const binaryItem = binaryListed.value.changes[0]
+check('a binary write parks', binaryListed.value.changes.length === 1)
+check('a binary file is described as binary', binaryItem !== undefined && binaryItem.kind === 'binary')
+check('a binary file reports no lines', binaryItem !== undefined && binaryItem.added === 0 && binaryItem.removed === 0)
+check('a binary file reports its bytes', binaryItem !== undefined && binaryItem.bytesBefore > 0 && binaryItem.bytesAfter === 1)
+check('a binary file is reviewable on its size', binaryItem !== undefined && binaryItem.reviewable === true)
+check('a binary file is not called unknowable', binaryItem !== undefined && binaryItem.reason === undefined)
+await call(route, 'decide', { id: binaryItem.id, action: 'accept' })
+check('a binary write accept allows', (await binaryParked).kind === 'allow')
+
+/* ---- formatting-only and line-ending-only changes ---- */
+// Re-indenting every line changes every byte and no content. Reported as its own
+// category so a reviewer is not asked to hunt through four hundred rows of noise.
+await call(route, 'list', {})
+const reindentParked = gate(exec('write', { file_path: 'D:/w/format.txt', content: '  alpha\n  beta\n  gamma\n  delta\n' }), next)
+await wait(30)
+const reindentListed = await call(route, 'list', {})
+const reindentItem = reindentListed.value.changes[0]
+check('a re-indented file is flagged as formatting only', reindentItem !== undefined && reindentItem.note === 'formatting')
+await call(route, 'decide', { id: reindentItem.id, action: 'accept' })
+check('a re-indented file accept allows', (await reindentParked).kind === 'allow')
+
+await call(route, 'list', {})
+const eolParked = gate(exec('write', { file_path: 'D:/w/eol.txt', content: 'alpha\r\nbeta\r\ngamma\r\ndelta\r\n' }), next)
+await wait(30)
+const eolListed = await call(route, 'list', {})
+const eolItem = eolListed.value.changes[0]
+check('a CRLF rewrite is flagged as line endings only', eolItem !== undefined && eolItem.note === 'line-endings')
+await call(route, 'decide', { id: eolItem.id, action: 'accept' })
+check('a CRLF rewrite accept allows', (await eolParked).kind === 'allow')
+
+/* ---- unknown tools judged by shape ---- */
+// A third-party filesystem server is not in any list this plugin can keep, so it
+// is judged by what the call looks like: a mutating verb plus a real path.
+await call(route, 'list', {})
+const intentParked = gate(exec('mcp__fs__write_file', { path: 'D:/w/intent.txt', content: 'hello\n' }), next)
+await wait(30)
+const intentListed = await call(route, 'list', {})
+const intentItem = intentListed.value.changes[0]
+check('a third-party write tool parks', intentListed.value.changes.length === 1)
+const intentDetail = intentItem === undefined ? { value: {} } : (await call(route, 'detail', { id: intentItem.id })).value
+check('the new text is diffed when the call carries it', intentDetail.after === 'hello\n')
+await call(route, 'decide', { id: intentItem.id, action: 'accept' })
+check('a third-party write accept allows', (await intentParked).kind === 'allow')
+
+// The same server's read is not a change: a path alone is not a mutation, or
+// every listing would stop for approval.
+check('a third-party read is not gated', (await gate(exec('mcp__fs__read_file', { path: 'D:/w/a.txt' }), next)).kind === 'allow')
+
+// A verb in prose is not an operation. `grep({pattern: "write"})` used to read as
+// a write and park a search for approval.
+check('a search for the word write is not a mutation', (await gate(exec('grep', { pattern: 'write', path: 'D:/w/a.txt' }), next)).kind === 'allow')
+check('a tool named write with no path is not gated', (await gate(exec('write_log', { level: 'info', message: 'started' }), next)).kind === 'allow')
 
 /* ---- not gated ---- */
 await call(route, 'list', {})

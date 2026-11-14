@@ -106,6 +106,15 @@ ok('an unverified change has no hash to check', opaque.verify === null)
 const unknownTool = record({ id: 'c11', tool: 'edit', op: 'update' })
 ok('edits are recorded too', unknownTool !== undefined)
 
+// The history is a list of changes somebody made, not a log of everything the
+// gate saw. A `shell` record means "a command ran and its effect is unknown", so
+// there is neither a file to put back nor a change to name.
+ok('a command whose effect is unknown is not history', record({
+  id: 'c12', tool: 'pwsh', op: 'shell', path: '', known: true,
+}) === undefined)
+ok('a record with no operation is not history', record({ id: 'c13', op: undefined }) === undefined)
+ok('a record with an invented operation is not history', record({ id: 'c14', op: 'inspect' }) === undefined)
+
 /* ------------------------------------------------------------------ switch -- */
 
 enabled.value = false
