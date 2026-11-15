@@ -622,6 +622,13 @@ for (const command of [
     'the pipeline is one step',
     texts.some((text) => text.includes('ForEach-Object') && text.includes('Get-ChildItem') && text.includes('-join')),
   )
+  // Folding fragments must not delete the separators that split them: putting them
+  // back together with a bare space turned a pipeline into `(… ForEach-Object …)`,
+  // which is not the command that ran.
+  check(
+    'the folded step still shows its pipes',
+    texts.some((text) => text.includes('|') && text.includes('ForEach-Object')),
+  )
   check('no step is a bare closing bracket', texts.every((text) => text.replace(/[{}()\[\]]/g, '').trim() !== ''))
   if (parked.item !== undefined) {
     await call(route, 'decide', { id: parked.item.id, action: 'accept' })
