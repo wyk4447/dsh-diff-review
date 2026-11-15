@@ -44,6 +44,8 @@ React.forcedView = null
 React.forcedHistory = false
 React.forcedRaw = false
 React.forcedList = null
+React.forcedTabInfo = null
+React.fullscreenCalls = []
 React.refs = []
 React.scrollers = []
 
@@ -89,7 +91,13 @@ const ctx = {
     // changed nothing the user could see.
     register: (definition) => { tabDefinition = definition; return () => {} },
   },
-  sidebarRight: { openTabIn: () => {} },
+  sidebarRight: {
+    openTabIn: () => {},
+    // The column's own fullscreen control is reached through these two: a target
+    // has to be captured before the action can be asked for.
+    commandTarget: () => ({ host: 'dock', id: 't1' }),
+    toggleFullscreen: (target) => { React.fullscreenCalls.push(target) },
+  },
   get: () => undefined,
 }
 
@@ -176,13 +184,17 @@ async function poll() {
 
 /** Render the panel, letting its effects run and re-render, the way React does. */
 async function render() {
+  const props = { sessionId: 's1' }
+  // The host hands each tab body a reader for its own column state; the stub has no
+  // such thing, so the panel's fullscreen wording is driven from here instead.
+  if (React.forcedTabInfo !== null) props.useTabInfo = () => React.forcedTabInfo
   for (let pass = 0; pass < 4; pass += 1) {
-    const out = serialize(TabBody({ sessionId: 's1' }))
+    const out = serialize(TabBody(props))
     if (pendingEffects.length === 0) return out
     flushEffects()
     await settle()
   }
-  return serialize(TabBody({ sessionId: 's1' }))
+  return serialize(TabBody(props))
 }
 
 async function main() {
@@ -311,6 +323,113 @@ async function main() {
   // did not change" wording, which is the opposite of why it is listed.
   if (!out.includes('0 → 64 B')) throw new Error('a binary file in the strip did not report its bytes')
   console.log('multi-file review: OK')
+
+  // 2c) A removed file used to arrive as a flat block of `-` lines under a heading
+  // that only said "the file will be removed" — how much went with it was the one
+  // fact missing. A folder is the same question one level up: it has no lines at
+  // all, so "this file was left unchanged" was the exact opposite of the truth.
+  React.forcedView = 'unified'
+  listPayload = {
+    ok: true,
+    value: {
+      changes: [
+        {
+          id: 'c10',
+          sessionId: 's1',
+          tool: 'pwsh',
+          displayPath: 'D:/w/gone.txt',
+          op: 'delete',
+          added: 0,
+          removed: 2,
+          oldLineCount: 2,
+          newLineCount: 0,
+          truncated: false,
+          reviewable: true,
+        },
+      ],
+      diag: null,
+    },
+  }
+  detailPayload = {
+    ok: true,
+    value: {
+      change: { id: 'c10' },
+      rows: [
+        { t: 'del', a: 1, b: null, text: 'line one' },
+        { t: 'del', a: 2, b: null, text: 'line two' },
+      ],
+      before: 'line one\nline two\n',
+      after: '',
+    },
+  }
+  await poll()
+  out = await render()
+  if (process.env.DUMP) console.log('DELETE OUT:', out)
+  if (!out.includes('整个文件将被删除')) throw new Error('a removal did not say the whole file goes away')
+  if (!out.includes('共 2 行')) throw new Error('a removal did not say how many lines go with it')
+
+  // The same removal read in the full-text view: there the left pane is the
+  // content, so the sentence replaces the empty right pane instead of the diff.
+  React.forcedView = 'full'
+  out = await render()
+  if (!out.includes('共 2 行')) throw new Error('the full-text view lost the removal count')
+  React.forcedView = 'unified'
+
+  // A folder is named as a whole: no line counts, no phantom "unchanged" cell.
+  listPayload.value.changes[0] = {
+    id: 'c11',
+    sessionId: 's1',
+    tool: 'pwsh',
+    displayPath: 'D:/w/olddir',
+    op: 'delete',
+    added: 0,
+    removed: 0,
+    oldLineCount: 0,
+    newLineCount: 0,
+    truncated: false,
+    reviewable: true,
+    directory: true,
+  }
+  detailPayload = { ok: true, value: { change: { id: 'c11' }, rows: [], before: '', after: '' } }
+  await poll()
+  out = await render()
+  if (!out.includes('整个目录将被删除')) throw new Error('a folder removal did not say the folder goes away')
+  if (out.includes('该文件内容未变')) throw new Error('a folder removal was reported as an unchanged file')
+
+  // The column is the width of a column: the host's own fullscreen control exists,
+  // and reaching it from inside the panel is the difference between reading a diff
+  // and reading three words at a time. The button follows the column's own state.
+  React.forcedTabInfo = { sidebar: { expanded: true, fullscreen: false } }
+  listPayload = {
+    ok: true,
+    value: {
+      changes: [
+        { id: 'c12', sessionId: 's1', tool: 'write', displayPath: 'D:/w/app.js', op: 'update', added: 1, removed: 1, oldLineCount: 3, newLineCount: 3, truncated: false, reviewable: true },
+      ],
+      diag: null,
+      allowAll: {},
+    },
+  }
+  detailPayload = {
+    ok: true,
+    value: {
+      change: { id: 'c12' },
+      rows: [{ t: 'add', a: null, b: 1, text: 'x' }],
+      before: '',
+      after: 'x\n',
+    },
+  }
+  await poll()
+  out = await render()
+  if (process.env.DUMP) console.log('FULLSCREEN OUT:', out)
+  if (!out.includes('全屏')) throw new Error('the panel did not offer the fullscreen control')
+  if (out.includes('退出全屏')) throw new Error('the fullscreen control claimed the column was already full')
+  React.forcedTabInfo = { sidebar: { expanded: true, fullscreen: true } }
+  out = await render()
+  if (!out.includes('退出全屏')) throw new Error('the fullscreen control did not follow the column state')
+  if (React.fullscreenCalls.length !== 0) throw new Error('the fullscreen action was fired without a click')
+  React.forcedTabInfo = null
+  console.log('removal wording, folder entries and the fullscreen control: OK')
 
   // 3) the two full-text panes share one scroll position
   React.forcedView = 'full'

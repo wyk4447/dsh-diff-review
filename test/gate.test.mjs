@@ -41,7 +41,9 @@ function makeCtx({ dir = 'D:/w', absent = false, throwOnGet = false } = {}) {
       // byte-count path pass while reporting 0 → 0.
       stat: async (target) => (String(target.targetKey).includes('fresh.txt') || files.get(String(target.targetKey)) === null
         ? undefined
-        : { version: 'v1', type: 'file', size: Buffer.byteLength(currentText(String(target.targetKey)), 'utf8') }),
+        : String(target.targetKey).includes('exists-dir')
+          ? { version: 'v1', type: 'directory', size: 0 }
+          : { version: 'v1', type: 'file', size: Buffer.byteLength(currentText(String(target.targetKey)), 'utf8') }),
       readText: async (target) => currentText(String(target.targetKey)),
       writeText: async (target, content) => {
         writes.push({ key: String(target.targetKey), content })
@@ -1152,6 +1154,33 @@ check('each file carries its own new text', Array.isArray(multiDetail.files) && 
 check('each file names its own path', Array.isArray(multiDetail.files) && multiDetail.files[0].path === 'D:/w/m1.txt' && multiDetail.files[1].path === 'D:/w/m2.txt')
 await call(route, 'decide', { id: multiItem.id, action: 'accept' })
 check('a two-file command accept allows', (await multiParked).kind === 'allow')
+
+/* ---- folders among the targets ---- */
+// A folder has no text to read, so it used to arrive as a file entry that failed to
+// diff and then sat in the strip saying "this file was left unchanged" — the exact
+// opposite of what happened to it. A write *into* a folder is different: the new
+// file has no name yet, so that one still needs the command-level prompt.
+await call(route, 'list', {})
+const intoFolder = await parkShell("Copy-Item 'D:/w/a.txt' -Destination 'D:/w/exists-dir'")
+check('a write into a folder still parks', intoFolder.item !== undefined)
+check('a write into a folder is a command-level review', intoFolder.item !== undefined && intoFolder.item.reason === 'shell-command')
+await call(route, 'decide', { id: intoFolder.item.id, action: 'accept' })
+check('a write into a folder accept allows', (await intoFolder.parked).kind === 'allow')
+
+await call(route, 'list', {})
+const removeFolder = await parkShell("Remove-Item -LiteralPath 'D:/w/exists-dir' -Recurse -Force")
+check('removing a folder parks', removeFolder.item !== undefined && removeFolder.item.op === 'delete')
+check('removing a folder is marked as a folder', removeFolder.item !== undefined && removeFolder.item.directory === true)
+await call(route, 'decide', { id: removeFolder.item.id, action: 'accept' })
+check('removing a folder accept allows', (await removeFolder.parked).kind === 'allow')
+
+// Creating a folder is not a content change: it must not prompt on its own, and it
+// must not leave a phantom "unchanged file" cell when it rides along with a write.
+await call(route, 'list', {})
+const makeFolder = gate(exec('pwsh', { command: "New-Item -ItemType Directory -Path 'D:/w/new-dir' -Force | Out-Null" }), next)
+check('creating a folder is not parked', (await makeFolder).kind === 'allow')
+const afterFolder = await call(route, 'list', {})
+check('creating a folder leaves nothing pending', afterFolder.value.changes.length === 0)
 
 /* ---- binary and contentless changes ---- */
 // A binary file has no lines: reading it as UTF-8 would only show replacement
