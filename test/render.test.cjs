@@ -18,13 +18,33 @@ const React = {
   // The history screen has the same problem twice over: no state update reaches
   // this stub, and its list arrives from a fetch the stub resolves after the
   // render. Forcing both values is the only way to reach that screen.
+  //
+  // Several screens now start from `false`: the history, the folded raw command,
+  // the editor and the two clear-confirmation flags. `forcedBools` names one by its
+  // ordinal among those `false` calls, in the order the panel declares them —
+  // declaring one earlier shifts the rest, and the test that forces it then fails
+  // loudly instead of quietly checking the wrong screen. The older single-flag
+  // forms stay for the screens that were already covered by them.
+  // Declarations are counted per render pass, so the counter is reset by
+  // render(); leaving it to run on would point every later pass at the wrong flag.
   useState: (initial) => {
     if (initial === 'unified' && React.forcedView !== null) return [React.forcedView, () => {}]
-    if (initial === false && React.forcedHistory === true) return [true, () => {}]
-    // The folded raw command is the same shape of problem: a click the stub
-    // cannot deliver. Forcing the state is how the opened block is rendered.
-    if (initial === false && React.forcedRaw === true) return [true, () => {}]
+    if (initial === false) {
+      const index = React.falseCount
+      React.falseCount += 1
+      if (React.forcedBools !== null && Object.prototype.hasOwnProperty.call(React.forcedBools, index)) {
+        return [React.forcedBools[index], () => {}]
+      }
+      if (React.forcedHistory === true) return [true, () => {}]
+      // The folded raw command is the same shape of problem: a click the stub
+      // cannot deliver. Forcing the state is how the opened block is rendered.
+      if (React.forcedRaw === true) return [true, () => {}]
+      return [initial, () => {}]
+    }
     if (Array.isArray(initial) && React.forcedList !== null) return [React.forcedList, () => {}]
+    // The editor's text is a useState seeded from the change, which this stub
+    // cannot seed: forcing it is how the box is shown holding the after-text.
+    if (initial === '' && React.forcedEditText !== null) return [React.forcedEditText, () => {}]
     return [initial, () => {}]
   },
   useMemo: (fn) => fn(),
@@ -45,6 +65,9 @@ React.forcedHistory = false
 React.forcedRaw = false
 React.forcedList = null
 React.forcedTabInfo = null
+React.forcedBools = null
+React.forcedEditText = null
+React.falseCount = 0
 React.fullscreenCalls = []
 React.refs = []
 React.scrollers = []
@@ -159,6 +182,20 @@ function serialize(node) {
   }
   // Class names are part of what this test asserts, so keep them in the dump.
   const className = typeof props.className === 'string' ? `<${props.className}>` : ''
+  // `data-*` carries the meaning a className cannot: a button is destructive, a
+  // group is folded, a switch is on. Without these the dump can only say a control
+  // exists, not what it promises — which is how a wrong label passed for a while.
+  const dataTags = Object.keys(props)
+    .filter((key) => key.startsWith('data-') && typeof props[key] === 'string')
+    .sort()
+    .map((key) => `<${key}=${props[key]}>`)
+    .join('')
+  // A textarea's text lives in `value`, which the children walk never sees. The
+  // editor's whole promise is that the box holds the model's after-text, so the
+  // value is dumped alongside the class to make that assertable.
+  const valueTag = type === 'textarea' && typeof props.value === 'string'
+    ? '<value>' + props.value + '</value>'
+    : ''
   // Scroll-sync needs two things the stub world otherwise lacks: a ref that holds
   // something scrollable, and a handle on the handlers to drive them.
   if (props.ref && typeof props.ref === 'object') {
@@ -167,7 +204,7 @@ function serialize(node) {
   if (typeof props.onScroll === 'function') {
     React.scrollers.push({ element: props.ref && props.ref.current, onScroll: props.onScroll })
   }
-  return className + serialize(node.children)
+  return className + dataTags + valueTag + serialize(node.children)
 }
 
 async function settle() {
@@ -189,11 +226,16 @@ async function render() {
   // such thing, so the panel's fullscreen wording is driven from here instead.
   if (React.forcedTabInfo !== null) props.useTabInfo = () => React.forcedTabInfo
   for (let pass = 0; pass < 4; pass += 1) {
+    // A pass starts from the first declaration again: the counter exists to name
+    // one boolean by its position, and a counter carried across passes would name
+    // a different one on the second look.
+    React.falseCount = 0
     const out = serialize(TabBody(props))
     if (pendingEffects.length === 0) return out
     flushEffects()
     await settle()
   }
+  React.falseCount = 0
   return serialize(TabBody(props))
 }
 
@@ -624,6 +666,28 @@ async function main() {
   if (out.includes('已全部允许')) throw new Error('the switch stayed on after being turned off')
   console.log('allow-all-switch: OK')
 
+  // The per-conversation off switch has to be reachable from an empty panel too:
+  // silencing a conversation leaves nothing on screen, ever, so the way back
+  // cannot depend on there being a pending change to show it beside.
+  listPayload.value.allowAll = {}
+  listPayload.value.changes = []
+  listPayload.value.off = {}
+  await poll()
+  out = await render()
+  if (!out.includes('本会话不审核')) throw new Error('the per-conversation switch did not render')
+  if (out.includes('已关闭 · 恢复审核')) throw new Error('the switch claimed to be off before it was turned off')
+
+  listPayload.value.off = { s1: true }
+  await poll()
+  out = await render()
+  if (!out.includes('已关闭 · 恢复审核')) throw new Error('the silenced state was not shown')
+  if (!out.includes('本会话已关闭审核')) throw new Error('silence was not explained, so a quiet panel looks broken')
+  const offOther = serialize(TabBody({ sessionId: 's2' }))
+  if (offOther.includes('已关闭 · 恢复审核')) throw new Error('this conversation switch leaked into another one')
+  listPayload.value.off = {}
+  await poll()
+  console.log('session-off-switch: OK')
+
   // The chip sits in one Session's header, so its number must be that Session's
   // number. Before this filter the title counted the whole poll, which announced
   // Session A's pending change inside Session B's header.
@@ -674,6 +738,10 @@ async function main() {
         { id: 'h3', path: 'D:/w/refused.js', op: 'update', state: 'rejected', restorable: true, verify: { kind: 'sha', sha: 'bb' }, restoredAt: null },
         { id: 'h4', path: 'D:/w/big.js', op: 'update', state: 'accepted', restorable: false, verify: null, restoredAt: null },
         { id: 'h5', path: 'D:/w/waved.js', op: 'update', state: 'allowed', restorable: true, verify: { kind: 'sha', sha: 'cc' }, restoredAt: null },
+        // The reader's own version reached the disk: nothing is pending, but the
+        // file still holds what they wrote, so the undo has to be offered and the
+        // row has to say which version is on disk.
+        { id: 'h6', path: 'D:/w/edited.js', op: 'update', state: 'applied', restorable: true, verify: { kind: 'sha', sha: 'dd' }, restoredAt: null },
       ],
     },
   }
@@ -691,15 +759,161 @@ async function main() {
   // A change the switch waved through is offered an undo too, and labelled for
   // what it was: nobody read it, so the list must not call it accepted.
   if (!out.includes('开关放行')) throw new Error('the history screen did not label an unreviewed change')
-  // Exactly two undo buttons now: the accepted one and the waved-through one. The
-  // restored entry, the rejected one (never reached the disk) and the truncated
-  // one (no trustworthy bytes) must not offer one.
+  // Exactly three undo buttons now: the accepted one, the waved-through one, and
+  // the one written from the panel. The restored entry, the rejected one (never
+  // reached the disk) and the truncated one (no trustworthy bytes) must not offer
+  // one.
   if ((out.match(/<dshr-btn>/g) || []).length === 0) throw new Error('the history screen offered no undo at all')
-  const undoButtons = out.split('<dshr-btn>').filter((chunk) => chunk.startsWith('还原'))
-  if (undoButtons.length !== 2) throw new Error(`the history screen offered ${undoButtons.length} undos, expected 2`)
+  // `data-*` tags sit between the class and the label, so the label is matched
+  // after skipping them rather than at the start of the chunk.
+  const undoButtons = out.split('<dshr-btn>').filter((chunk) => /^(?:<data-[^>]*>)*还原/.test(chunk))
+  if (undoButtons.length !== 3) throw new Error(`the history screen offered ${undoButtons.length} undos, expected 3`)
+  if (!out.includes('已按你的版本落盘')) throw new Error('an entry written from the panel did not say whose version is on disk')
   if (out.includes('本会话还没有审查记录')) throw new Error('the history screen showed its empty hint with entries present')
   React.forcedHistory = false
   React.forcedList = null
+
+  // 5) the history grouped by turn. A flat list answers "what changed?" but not
+  // the question a reader actually has — "what did it just do?" — and the change
+  // made a moment ago is the one they are deciding about. The current turn opens;
+  // the older ones fold, because a long conversation otherwise opens on a wall of
+  // rows with the reader's own turn buried somewhere inside it.
+  historyPayload = {
+    ok: true,
+    value: {
+      entries: [
+        { id: 't1', path: 'D:/w/early.js', op: 'update', state: 'accepted', turn: 1, added: 3, removed: 1, restorable: false, verify: null, restoredAt: null },
+        { id: 't2', path: 'D:/w/mid.js', op: 'create', state: 'accepted', turn: 2, added: 5, removed: 0, restorable: false, verify: null, restoredAt: null },
+        { id: 't2b', path: 'D:/w/mid2.js', op: 'update', state: 'accepted', turn: 2, added: 0, removed: 0, restorable: false, verify: null, restoredAt: null },
+        { id: 't3', path: 'D:/w/now.js', op: 'update', state: 'accepted', turn: 3, added: 2, removed: 2, restorable: false, verify: null, restoredAt: null },
+      ],
+    },
+  }
+  listPayload = { ok: true, value: { changes: [], diag: null, allowAll: {}, turn: 3 } }
+  React.forcedList = historyPayload.value.entries
+  React.forcedBools = { 0: true }
+  await poll()
+  out = await render()
+  if (process.env.DUMP) console.log('GROUPS OUT:', out)
+  if (!out.includes('本轮')) throw new Error('the current turn was not named as the current one')
+  if (!out.includes('第 2 轮')) throw new Error('an earlier turn lost its number')
+  if (!out.includes('3 个文件') && !out.includes('2 个文件')) throw new Error('a folded group did not say how many files it holds')
+  // The reader's own turn is open, the older ones are shut: the row of the current
+  // turn must be drawn and the earlier files must not be.
+  if (!out.includes('now.js')) throw new Error('the current turn was folded shut')
+  if (out.includes('early.js') || out.includes('mid.js')) throw new Error('an earlier turn was opened by default')
+  React.forcedBools = null
+  React.forcedList = null
+
+  // 6) the editor. The box is the whole file, the left pane is what is on disk,
+  // and applying writes what the reader typed instead of what the model proposed.
+  listPayload = {
+    ok: true,
+    value: {
+      changes: [
+        { id: 'e1', sessionId: 's1', tool: 'write', displayPath: 'D:/w/edit.js', op: 'update', kind: 'text', added: 1, removed: 1, oldLineCount: 2, newLineCount: 2, truncated: false, reviewable: true },
+      ],
+      diag: null,
+      allowAll: {},
+    },
+  }
+  detailPayload = {
+    ok: true,
+    value: {
+      change: { id: 'e1' },
+      rows: [
+        { t: 'del', a: 1, b: null, text: 'old();' },
+        { t: 'add', a: null, b: 1, text: 'next();' },
+      ],
+      before: 'old();\n',
+      after: 'next();\n',
+    },
+  }
+  React.forcedEditText = 'next();\n'
+  React.forcedBools = { 2: true }
+  await poll()
+  out = await render()
+  if (process.env.DUMP) console.log('EDIT OUT:', out)
+  if (!out.includes('dshr-editor')) throw new Error('the editor did not render a text area')
+  // The button is what a reader actually reaches for; the editor opening on its own
+  // proves nothing about whether they could have opened it. `kind` is what the host
+  // sends for a file tool, and leaving it out of this fixture is what once made the
+  // guard fail silently while the assertion above still passed.
+  if (!out.includes('改一下')) throw new Error('the editor opened without the button that opens it')
+  if (!out.includes('<value>next();')) throw new Error('the editor was not holding the proposed text')
+  if (!out.includes('应用') || !out.includes('放弃')) throw new Error('the editor did not offer apply and discard')
+  // Bytes, not characters: "next();\n" is eight of them. The count is what the
+  // request ceiling is measured in, so it is what the reader is shown.
+  if (!out.includes('8 字节')) throw new Error('the editor did not count what it is about to send')
+  React.forcedBools = null
+  React.forcedEditText = null
+
+  // 6b) a command cannot be edited: the text was never the model's to propose.
+  // The button must be absent, not disabled — a permanently dead control reads as
+  // a bug in the panel rather than a rule about the change.
+  listPayload.value.changes[0] = {
+    id: 'e2',
+    sessionId: 's1',
+    tool: 'pwsh',
+    displayPath: 'D:/w/cmd.js',
+    op: 'update',
+    added: 1,
+    removed: 1,
+    oldLineCount: 1,
+    newLineCount: 1,
+    truncated: false,
+    reviewable: true,
+  }
+  await poll()
+  out = await render()
+  if (out.includes('改一下')) throw new Error('a shell command was offered the editor')
+  // A removal is not editable either: there is no text to replace.
+  listPayload.value.changes[0] = {
+    id: 'e3',
+    sessionId: 's1',
+    tool: 'write',
+    displayPath: 'D:/w/removed.js',
+    op: 'delete',
+    added: 0,
+    removed: 2,
+    oldLineCount: 2,
+    newLineCount: 0,
+    truncated: false,
+    reviewable: true,
+  }
+  await poll()
+  out = await render()
+  if (out.includes('改一下')) throw new Error('a removal was offered the editor')
+
+  // 7) the history totals and its two clear buttons. The bar shows what the store
+  // is holding, and the screen that lists it is where it can be dropped — all of
+  // it, or one turn. Both are two-step: deleting snapshots is not undoable, and a
+  // single stray click next to a fold target must not be able to do it.
+  historyPayload = {
+    ok: true,
+    value: {
+      entries: [
+        { id: 'c1', path: 'D:/w/early.js', op: 'update', state: 'accepted', turn: 1, added: 3, removed: 1, restorable: false, verify: null, restoredAt: null },
+        { id: 'c2', path: 'D:/w/now.js', op: 'update', state: 'accepted', turn: 2, added: 2, removed: 2, restorable: false, verify: null, restoredAt: null },
+      ],
+    },
+  }
+  listPayload = { ok: true, value: { changes: [], diag: null, allowAll: {}, turn: 2, history: { entries: 2, bytes: 1536 } } }
+  React.forcedList = historyPayload.value.entries
+  React.forcedBools = { 0: true }
+  await poll()
+  out = await render()
+  if (process.env.DUMP) console.log('CLEAR OUT:', out)
+  // 1.5 KB, not 1536: the bar is read at a glance, so the unit is chosen for it.
+  if (!out.includes('2 条 · 1.5 KB')) throw new Error('the bar did not report what the history is holding')
+  if (!out.includes('清空全部')) throw new Error('the history screen offered no way to clear everything')
+  if (!out.includes('清空这一轮')) throw new Error('the history screen offered no per-turn clear')
+  // Both clear controls are destructive, and they say so through `data-danger`:
+  // the styling is what stops a reader reaching for one by accident.
+  if (!out.includes('data-danger')) throw new Error('the clear buttons were not drawn as destructive')
+  React.forcedBools = null
+  React.forcedList = null
+  console.log('history totals and clear buttons: OK')
 
   console.log('client render smoke: OK')
 }

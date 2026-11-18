@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +19,17 @@ const DEFAULT_TEXT = 'alpha\nbeta\ngamma\ndelta\n'
 const files = new Map()
 const writes = []
 const currentText = (key) => (files.has(key) ? files.get(key) : DEFAULT_TEXT)
+// Versions are fake but they have to move, because `replaceIfVersion` is the only
+// thing standing between an in-panel edit and overwriting a file that changed
+// while the panel was open. A stub that always says `v1` would make that guard
+// untestable — every write would look fresh.
+const versions = new Map()
+let versionCounter = 1
+const currentVersion = (key) => (versions.has(key) ? versions.get(key) : 'v1')
+// Files that start out absent for this fake workspace. A write creates them; a
+// delete removes them again. The creation-then-deletion case a turn can produce
+// needs a second such name, and `fresh.txt` is already load-bearing above.
+const absentFiles = new Set(['D:/w/fresh.txt', 'D:/w/brand-new.txt'])
 
 function makeCtx({ dir = 'D:/w', absent = false, throwOnGet = false } = {}) {
   const routes = []
@@ -39,21 +50,54 @@ function makeCtx({ dir = 'D:/w', absent = false, throwOnGet = false } = {}) {
       // creation path distinguishable from an overwrite. `size` is real, because a
       // binary file is reported by size alone and a fake without it would let the
       // byte-count path pass while reporting 0 → 0.
-      stat: async (target) => (String(target.targetKey).includes('fresh.txt') || files.get(String(target.targetKey)) === null
+      stat: async (target) => (absentFiles.has(String(target.targetKey)) || files.get(String(target.targetKey)) === null
         ? undefined
         : String(target.targetKey).includes('exists-dir')
-          ? { version: 'v1', type: 'directory', size: 0 }
-          : { version: 'v1', type: 'file', size: Buffer.byteLength(currentText(String(target.targetKey)), 'utf8') }),
+          ? { version: currentVersion(String(target.targetKey)), type: 'directory', size: 0 }
+          : {
+              version: currentVersion(String(target.targetKey)),
+              type: 'file',
+              size: Buffer.byteLength(currentText(String(target.targetKey)), 'utf8'),
+            }),
       readText: async (target) => currentText(String(target.targetKey)),
-      writeText: async (target, content) => {
-        writes.push({ key: String(target.targetKey), content })
-        files.set(String(target.targetKey), content)
-        return { operation: 'write', version: 'v2' }
+      writeText: async (target, content, expected) => {
+        const key = String(target.targetKey)
+        // Mirror the host's guard, otherwise the fake would happily accept a write
+        // that the real filesystem refuses and the "stale" path would go untested.
+        if (expected?.kind === 'replaceIfVersion') {
+          // `files` only holds what a test explicitly wrote or deleted; an absent
+          // key still means the default text exists, which is exactly what `stat`
+          // reports above. Only an explicit `null` is a missing file.
+          if (files.get(key) === null) {
+            const error = new Error('stale version')
+            error.code = 'FS_STALE_VERSION'
+            throw error
+          }
+          if (currentVersion(key) !== expected.version) {
+            const error = new Error('stale version')
+            error.code = 'FS_STALE_VERSION'
+            throw error
+          }
+        } else if (expected?.kind === 'createIfAbsent' && files.has(key) && files.get(key) !== null) {
+          const error = new Error('already exists')
+          error.code = 'FS_NOT_OBSERVED'
+          throw error
+        }
+        writes.push({ key, content })
+        files.set(key, content)
+        // A path that started out absent stops being absent the moment it is
+        // written; leaving it in the set would report a created file as missing.
+        absentFiles.delete(key)
+        versionCounter += 1
+        versions.set(key, `v${versionCounter}`)
+        return { operation: 'write', version: currentVersion(key) }
       },
       deleteFile: async (target) => {
         const key = String(target.targetKey)
         const before = currentText(key)
         files.set(key, null)
+        versionCounter += 1
+        versions.set(key, `v${versionCounter}`)
         return { before }
       },
     },
@@ -530,6 +574,46 @@ for (const command of [
   await parked.parked
 }
 
+// A shell host wrapping disposable work (`cmd /c node <scratch>/probe.mjs 2>&1`)
+// is the shape of nearly every throwaway probe, and the payload cannot touch
+// anything the reviewer would want to keep: every path in it lands in the
+// scratch or temp roots, which are skipped anyway. Wrapping it in `cmd /c` used
+// to hide that, because the wrapper reads as "runs code" and the payload became
+// an unnameable command record. Now the payload is inspected and, when it is
+// inert, the pass says `shell-scratch` rather than `shell-not-destructive`.
+for (const command of [
+  'cmd /c "node D:/w/.dsh/tmp/probe.mjs"',
+  'cmd /c "node D:/w/.dsh/tmp/probe.mjs 2>&1"',
+  'cmd /c "del D:/w/.dsh/tmp/y.txt"',
+  'bash -c "node D:/w/.dsh/tmp/probe.mjs"',
+  'powershell -Command "del D:/w/.dsh/tmp/y.txt"',
+]) {
+  const inert = await gate(exec('pwsh', { command }), next)
+  check(`a shell host around disposable work is not parked ${command}`, (await inert).kind === 'allow')
+  const listedInert = await call(route, 'list', {})
+  check(`the pass says why ${command}`, listedInert.value.diag.reason === 'shell-scratch')
+}
+
+// Unwrapping must not turn into a bypass. The same wrapper around a path outside
+// the disposable roots still parks, and so does a payload with no nameable path
+// at all: `cmd /c evil.exe` names nothing this parser can clear, and a mixed
+// command is only as inert as its least inert statement.
+for (const command of [
+  'cmd /c "del D:/w/a.txt"',
+  'cmd /c "node D:/w/real.mjs"',
+  'cmd /c "node D:/w/.dsh/../real.mjs"',
+  'cmd /c "evil.exe"',
+  'cmd /c "echo hi"',
+  'cmd /c "node D:/w/.dsh/tmp/probe.mjs" ; del D:/w/a.txt',
+]) {
+  const notInert = await parkShell(command)
+  check(`a shell host around real work still parks ${command}`, notInert.item !== undefined)
+  if (notInert.item !== undefined) {
+    await call(route, 'decide', { id: notInert.item.id, action: 'accept' })
+    await notInert.parked
+  }
+}
+
 // A .NET call whose arguments are literals is still knowable, so it gets a diff
 // rather than the command block. The first argument is a positional path.
 const dotnetLiteral = await parkShell("[System.IO.File]::WriteAllText('D:/w/a.txt', 'body')")
@@ -593,6 +677,95 @@ for (const command of [
     await hashing
   }
   check('the hashing command leaves nothing pending', (await call(route, 'list', {})).value.changes.length === 0)
+}
+
+/* ---- git subcommands ---- */
+// `git` used to be one entry in a mutating set, so `git branch` and `git stash list`
+// asked the reviewer to approve a command that writes nothing. Loosening that by
+// "any second token that is not obviously a flag" would be the same guess in reverse:
+// `git branch newbr` creates a branch and `git branch -D x` deletes one. Only the
+// listed read-only options pass; everything else keeps asking.
+for (const command of [
+  'git branch',
+  'git branch -a',
+  'git branch --list',
+  'git stash list',
+  'git stash show',
+]) {
+  await call(route, 'list', {})
+  const reading = gate(exec('pwsh', { command }), next)
+  const verdict = await Promise.race([reading.then((out) => out.kind), wait(120).then(() => 'parked')])
+  check(`git read-only subcommand is not parked ${command}`, verdict === 'allow')
+  if (verdict !== 'allow') {
+    for (const open of (await call(route, 'list', {})).value.changes) await call(route, 'decide', { id: open.id, action: 'reject' })
+    await reading
+  }
+  check(`git read-only subcommand leaves nothing pending ${command}`, (await call(route, 'list', {})).value.changes.length === 0)
+}
+
+// `checkout` and `switch` have no read-only form: switching branches rewrites the
+// whole working tree, and `git checkout a.txt` overwrites that file from the index.
+// Whether it destroys anything depends on uncommitted state at run time, which no
+// argument scan can see. These assertions exist so nobody "simplifies" them back
+// into the read-only list on the strength of a missing `-b`.
+for (const command of [
+  'git branch -D topic',
+  'git branch newbr',
+  'git branch --set-upstream-to=origin/main',
+  'git stash',
+  'git stash pop',
+  'git stash drop',
+  'git checkout main',
+  'git checkout a.txt',
+  'git checkout -- .',
+  'git switch main',
+  'git switch -c feat',
+]) {
+  const parked = await parkShell(command)
+  check(`git mutating subcommand still parks ${command}`, parked.item !== undefined)
+  await call(route, 'decide', { id: parked.item.id, action: 'accept' })
+  check(`git mutating subcommand accept allows ${command}`, (await parked.parked).kind === 'allow')
+}
+
+// Known holes, recorded as they are rather than as they should be. `git remote` is
+// not a file write anyone can see from the command, and `--output=` writes a file
+// without a redirect for the statement scanner to notice. Both would need a rewrite
+// of `git` handling; until then this test pins the current behaviour so a future
+// change that silently starts gating them is caught, and so nobody reads the
+// read-only list above and believes it covers them.
+for (const command of ['git remote add origin https://example.com/r.git', 'git log --output=f.txt']) {
+  await call(route, 'list', {})
+  const hole = gate(exec('pwsh', { command }), next)
+  const verdict = await Promise.race([hole.then((out) => out.kind), wait(120).then(() => 'parked')])
+  check(`known hole is still ungated ${command}`, verdict === 'allow')
+  if (verdict !== 'allow') {
+    for (const open of (await call(route, 'list', {})).value.changes) await call(route, 'decide', { id: open.id, action: 'reject' })
+    await hole
+  }
+}
+
+/* ---- directories ---- */
+// Making a directory is not a file write: it cannot replace a byte that already
+// exists. Counting it as one put a phantom entry in the file strip — "this file was
+// left unchanged" for a path that is not a file — and asked for approval of
+// something the panel could say nothing about.
+for (const command of ['mkdir out', 'mkdir -p a/b', 'New-Item -ItemType Directory lib']) {
+  await call(route, 'list', {})
+  const making = gate(exec('pwsh', { command }), next)
+  const verdict = await Promise.race([making.then((out) => out.kind), wait(120).then(() => 'parked')])
+  check(`making a directory is not parked ${command}`, verdict === 'allow')
+  if (verdict !== 'allow') {
+    for (const open of (await call(route, 'list', {})).value.changes) await call(route, 'decide', { id: open.id, action: 'reject' })
+    await making
+  }
+}
+// The exemption is by shape, not by cmdlet: `New-Item` that writes a file value is
+// still a write.
+{
+  const parked = await parkShell("New-Item -Path 'D:/w/a.txt' -Value 'body'")
+  check('New-Item writing file content still parks', parked.item !== undefined)
+  await call(route, 'decide', { id: parked.item.id, action: 'accept' })
+  check('New-Item writing file content accept allows', (await parked.parked).kind === 'allow')
 }
 
 /* ---- command steps ---- */
@@ -715,6 +888,37 @@ for (const command of [
     await verdict
   }
   check('the report script that started this leaves nothing pending', (await call(route, 'list', {})).value.changes.length === 0)
+}
+
+// Grouping parentheses sit flush against a cmdlet when the group has no inner
+// spaces: `(Get-Process | Out-String)` splits on `|` into `(Get-Process` and
+// `Out-String)`. That trailing `)` made the harmless lookup miss, so `Out-String`
+// fell into the mutating-prefix branch and the reviewer was asked to approve
+// formatting a table. Every one of these is a read.
+for (const grouped of [
+  '(Get-Process | Out-String)',
+  'Get-Process | Out-String)',
+  '(Get-Process | Format-Table -AutoSize | Out-String)',
+  '(Get-Content D:/w/a.txt -Raw | ConvertFrom-Json).version',
+  'Write-Host hi)',
+]) {
+  check(`a grouped pipeline is a read ${grouped}`, (await gate(exec('pwsh', { command: grouped }), next)).kind === 'allow')
+}
+
+// A group around the whole command leaves a parenthesis flush against the host
+// name and another one after the payload: `(cmd /c "del x")`. Both have to be
+// read through, or a disposable payload keeps its "cannot be known" review.
+for (const [label, command, expected] of [
+  ['a group around a disposable command is still disposable', '(cmd /c "del D:/.dsh/tmp/x.txt")', 'allow'],
+  ['a group around a real removal still parks', '(cmd /c "del D:/w/a.txt")', 'parked'],
+]) {
+  const verdict = gate(exec('pwsh', { command }), next)
+  const kind = await Promise.race([verdict.then((out) => out.kind), wait(150).then(() => 'parked')])
+  check(label, kind === expected)
+  if (kind === 'parked') {
+    for (const open of (await call(route, 'list', {})).value.changes) await call(route, 'decide', { id: open.id, action: 'reject' })
+    await verdict
+  }
 }
 
 for (const harmless of [
@@ -935,6 +1139,14 @@ const listedDelete = await call(route, 'list', { sessionId: 's1' })
 check('delete still parks while writes are allowed', listedDelete.value.changes.length === 1)
 await call(route, 'decide', { id: listedDelete.value.changes[0].id, action: 'reject' })
 check('delete while writes are allowed can be rejected', (await deleteInTurn).kind === 'deny')
+// The turn is not only for writes: a command's snapshot is what fills the
+// per-turn groups in the history screen, and an entry without the number lands
+// under "unannotated" where it cannot be cleared a turn at a time.
+const deleteHistory = await call(route, 'history', { sessionId: 's1' })
+const deleteEntry = deleteHistory.value.entries.find(
+  (entry) => entry.path === 'D:/w/a.txt' && entry.op === 'delete',
+)
+check('a command-recorded entry carries the turn too', deleteEntry !== undefined && deleteEntry.turn === 7)
 
 // Emptying a file is an edit, not a removal: the file is still there afterwards,
 // and the panel can show every line as removed. Treating it as a delete kept it
@@ -1243,6 +1455,248 @@ check('a third-party read is not gated', (await gate(exec('mcp__fs__read_file', 
 // a write and park a search for approval.
 check('a search for the word write is not a mutation', (await gate(exec('grep', { pattern: 'write', path: 'D:/w/a.txt' }), next)).kind === 'allow')
 check('a tool named write with no path is not gated', (await gate(exec('write_log', { level: 'info', message: 'started' }), next)).kind === 'allow')
+
+/* ---- editing the change before it lands ---- */
+// The reviewer can rewrite the pending text and write it themselves. The tool is
+// then refused, because its own version would overwrite what the reviewer chose.
+await call(route, 'list', {})
+const editedContent = 'alpha\nbeta\ngamma\nEDITED\n'
+const editedParked = gate(exec('write', { file_path: 'D:/w/edited.txt', content: editedContent }), next)
+await wait(30)
+const editedListed = await call(route, 'list', {})
+const editedId = editedListed.value.changes[editedListed.value.changes.length - 1].id
+const editedApply = await call(route, 'applyEdited', {
+  id: editedId,
+  sessionId: 's1',
+  content: 'alpha\nbeta\ngamma\nMINE\n',
+})
+check('the reviewer\'s text is written', editedApply.value.ok === true)
+check('the file holds the reviewer\'s text', currentText('D:/w/edited.txt') === 'alpha\nbeta\ngamma\nMINE\n')
+check('the taken-over tool is refused', (await editedParked).kind !== 'allow')
+const editedHistory = await call(route, 'history', { sessionId: 's1' })
+const editedEntry = editedHistory.value.entries.find((entry) => entry.id === editedId)
+check('the entry records that it was applied by hand', editedEntry !== undefined && editedEntry.state === 'applied')
+// The verification hash has to follow the reviewer's text: keeping the tool's
+// version would make every later undo fail with "the file changed since".
+const editedUndo = await call(route, 'restore', { id: editedId, sessionId: 's1' })
+check('a hand-applied change can still be taken back', editedUndo.value.ok === true)
+check('the undo restored the original text', currentText('D:/w/edited.txt') === DEFAULT_TEXT)
+
+// The model must learn that its write was replaced, or it would simply write
+// again and destroy the edit. A denial alone reads as "failed, try harder".
+const postExecute = handlers.get('tools/post-execute')
+check('the takeover listener is registered', typeof postExecute === 'function')
+const takeover = await postExecute(exec('write', { file_path: 'D:/w/edited.txt' }), {}, next)
+check('the replaced write is reported as taken over', takeover.kind === 'block')
+check('the notice tells the model not to retry', JSON.stringify(takeover.feedback).includes('Do not write this file again'))
+const afterTakeover = await postExecute(exec('write', { file_path: 'D:/w/edited.txt' }), {}, next)
+check('an unrelated call is left alone', afterTakeover.kind === 'allow')
+
+// Editing is a text-file privilege. A shell record has no target of its own and a
+// removal has no text to edit, so both are refused instead of half-working.
+await call(route, 'list', {})
+const noEditShell = gate(exec('pwsh', { command: "Remove-Item -LiteralPath 'D:/w/a.txt'" }), next)
+await wait(30)
+let current2 = await call(route, 'list', {})
+const shellEdit = await call(route, 'applyEdited', { id: current2.value.changes[0].id, sessionId: 's1', content: 'x' })
+check('a shell record is not editable', shellEdit.value.error === 'not-editable')
+await call(route, 'decide', { id: current2.value.changes[0].id, action: 'reject' })
+await noEditShell
+
+await call(route, 'list', {})
+const emptyEdit = await call(route, 'applyEdited', { id: 'no-such-change', sessionId: 's1', content: 'x' })
+check('an unknown change cannot be edited', emptyEdit.value.missing === true)
+const foreignEdit = await call(route, 'applyEdited', { id: editedId, sessionId: 's2', content: 'x' })
+check('another conversation cannot edit it', foreignEdit.value.missing === true)
+
+// A file that changed while the panel was open must not be overwritten: the
+// reviewer saw one version, and writing over a third one would lose it silently.
+await call(route, 'list', {})
+const staleParked2 = gate(exec('write', { file_path: 'D:/w/moved.txt', content: 'alpha\nbeta\ngamma\nNEW\n' }), next)
+await wait(30)
+const staleListed2 = await call(route, 'list', {})
+const staleId2 = staleListed2.value.changes[staleListed2.value.changes.length - 1].id
+await ctx.fs.writeText({ targetKey: 'D:/w/moved.txt' }, 'written by someone else\n')
+const staleApply = await call(route, 'applyEdited', { id: staleId2, sessionId: 's1', content: 'alpha\nbeta\ngamma\nMINE\n' })
+check('an edit over a newer file is refused', staleApply.value.error === 'stale')
+check('the newer text survives', currentText('D:/w/moved.txt') === 'written by someone else\n')
+await call(route, 'decide', { id: staleId2, action: 'reject' })
+await staleParked2
+
+// Sending the same text back is not an edit: saying "ok" must not be reported as
+// a write that happened.
+await call(route, 'list', {})
+const sameParked = gate(exec('write', { file_path: 'D:/w/a.txt', content: 'alpha\nbeta\ngamma\n' }), next)
+await wait(30)
+const sameListed = await call(route, 'list', {})
+const sameId = sameListed.value.changes[sameListed.value.changes.length - 1].id
+const sameApply = await call(route, 'applyEdited', { id: sameId, sessionId: 's1', content: DEFAULT_TEXT })
+check('an unchanged edit is refused', sameApply.value.error === 'unchanged')
+await call(route, 'decide', { id: sameId, action: 'reject' })
+await sameParked
+
+/* ---- the whole file, not just the diff ---- */
+// The history view compares the file as it is now with the copy taken before the
+// change, so it needs both texts and their line-by-line rows.
+const detailOne = await call(route, 'historyDetail', { id: undoId, sessionId: 's1' })
+check('the history detail returns both texts', detailOne.value.before === DEFAULT_TEXT && detailOne.value.after === undoContent)
+check('the history detail returns rows', Array.isArray(detailOne.value.rows) && detailOne.value.rows.some((row) => row.t === 'del'))
+const detailForeign = await call(route, 'historyDetail', { id: undoId, sessionId: 's2' })
+check('another conversation cannot read the whole file', detailForeign.value.missing === true)
+const detailUnknown = await call(route, 'historyDetail', { id: 'nope', sessionId: 's1' })
+check('an unknown entry has no whole file', detailUnknown.value.missing === true)
+
+/* ---- how much is stored ---- */
+// The bar shows a count and a size, and it cannot measure either one itself: the
+// blobs live in the host's store. So `list` carries them, and `history` answers
+// the same numbers when the screen is open.
+const statsList = await call(route, 'list', { sessionId: 's1' })
+check(
+  'the poll reports what the history is holding',
+  typeof statsList.value.history === 'object'
+    && statsList.value.history !== null
+    && typeof statsList.value.history.entries === 'number'
+    && statsList.value.history.entries > 0
+    && typeof statsList.value.history.bytes === 'number'
+    && statsList.value.history.bytes > 0,
+)
+
+check(
+  'a session-less poll reports zero',
+  (await call(route, 'list', {})).value.history.entries === 0,
+)
+const statsHistory = await call(route, 'history', { sessionId: 's1' })
+check(
+  'the history screen agrees with the bar',
+  statsHistory.value.stats.entries === statsHistory.value.entries.length
+    && statsHistory.value.stats.bytes > 0,
+)
+
+/* ---- clearing one turn ---- */
+// A conversation that has been going for days is exactly the case where the
+// snapshot store grows without anyone noticing, so clearing has to work per turn:
+// deleting everything to reclaim the space of one turn is not an answer.
+const clearParkedWrites = []
+const turnOf = (await call(route, 'history', { sessionId: 's1' })).value.entries
+const someTurn = turnOf.find((entry) => typeof entry.turn === 'number')
+check('history entries carry the turn that made them', someTurn !== undefined)
+if (someTurn !== undefined) {
+  const others = turnOf.filter((entry) => entry.turn !== someTurn.turn).length
+  const clearedTurn = await call(route, 'historyClear', { sessionId: 's1', turn: someTurn.turn })
+  check('clearing one turn reports the list back', Array.isArray(clearedTurn.value.entries))
+  check(
+    'only that turn is gone',
+    clearedTurn.value.entries.every((entry) => entry.turn !== someTurn.turn)
+      && clearedTurn.value.entries.length === others,
+  )
+  check('the count moves with it', clearedTurn.value.stats.entries === clearedTurn.value.entries.length)
+}
+// A turn nobody has an entry for is not an error, and must not delete anything.
+const clearMissing = await call(route, 'historyClear', { sessionId: 's1', turn: 99999 })
+check('clearing a turn with nothing in it removes nothing', clearMissing.value.removed === 0)
+check('the list survives that', clearMissing.value.entries.length > 0)
+
+/* ---- clearing everything ---- */
+// Another conversation's history is not reachable: the store is keyed per
+// session, and a clear names its own.
+const beforeClear = await call(route, 'history', { sessionId: 's1' })
+check('there is something to clear', beforeClear.value.entries.length > 0)
+const clearedAllHistory = await call(route, 'historyClear', { sessionId: 's1' })
+check('clearing all removes every entry', clearedAllHistory.value.entries.length === 0)
+check('clearing all reports what went', clearedAllHistory.value.removed === beforeClear.value.entries.length)
+check('the store reads empty afterwards', clearedAllHistory.value.stats.entries === 0 && clearedAllHistory.value.stats.bytes === 0)
+check(
+  'the next poll reports the empty store',
+  (await call(route, 'list', { sessionId: 's1' })).value.history.entries === 0,
+)
+check('a session-less clear is refused', (await call(route, 'historyClear', {})).value.missing === true)
+
+/* ---- one file, one turn, one row ---- */
+// A model that rewrites the same file five times while answering one message used
+// to leave five rows saying the same thing. Folding them into the single row that
+// stands for the file in that turn is what makes the list readable — and what
+// makes its undo put the file back to how the turn found it, rather than to how
+// the previous write left it.
+turnEvent('turn/start', 9)
+files.set('D:/w/merged.txt', 'one\ntwo\nthree\n')
+await call(route, 'list', {})
+const mergeFirst = gate(exec('write', { file_path: 'D:/w/merged.txt', content: 'one\nTWO\nthree\n' }), next)
+await wait(30)
+let mergeListed = await call(route, 'list', {})
+await call(route, 'decide', { id: mergeListed.value.changes[0].id, action: 'accept' })
+await mergeFirst
+// The tool ran: the first write is on disk now, which is the "before" of the second.
+files.set('D:/w/merged.txt', 'one\nTWO\nthree\n')
+await call(route, 'list', {})
+const mergeSecond = gate(exec('write', { file_path: 'D:/w/merged.txt', content: 'one\nTWO\nTHREE\n' }), next)
+await wait(30)
+mergeListed = await call(route, 'list', {})
+const mergeSecondId = mergeListed.value.changes[0].id
+await call(route, 'decide', { id: mergeSecondId, action: 'accept' })
+await mergeSecond
+const mergedRows = (await call(route, 'history', { sessionId: 's1' })).value.entries
+  .filter((entry) => entry.path === 'D:/w/merged.txt')
+check('two writes to one file in one turn leave one row', mergedRows.length === 1)
+check('the row keeps the turn it belongs to', mergedRows[0] !== undefined && mergedRows[0].turn === 9)
+// Net, not the sum of both writes: the turn took the file from three lines to
+// three different lines, so two lines changed and two did not survive.
+check('the row counts the net change', mergedRows[0] !== undefined && mergedRows[0].added === 2 && mergedRows[0].removed === 2)
+check('the row still reads as an update', mergedRows[0] !== undefined && mergedRows[0].op === 'update')
+check('the row answers to the latest call', mergedRows[0] !== undefined && mergedRows[0].id === mergeSecondId)
+
+// Created and removed inside one turn: the file is exactly as the turn found it,
+// so a row would offer an undo with nothing left to undo.
+await call(route, 'list', {})
+const bornParked = gate(exec('write', { file_path: 'D:/w/brand-new.txt', content: 'temporary\n' }), next)
+await wait(30)
+const bornListed = await call(route, 'list', {})
+await call(route, 'decide', { id: bornListed.value.changes[bornListed.value.changes.length - 1].id, action: 'accept' })
+check('a created file is accepted', (await bornParked).kind === 'allow')
+// The fake host does not perform the write a `write` call asks for — the gate only
+// says yes. Putting the bytes there by hand is what makes the following removal a
+// removal of something real rather than of a path that never existed.
+files.set('D:/w/brand-new.txt', 'temporary\n')
+// It exists now, so the fake `stat` must stop reporting the path as absent — a
+// removal of a path that is not there is neither destructive nor reviewable.
+absentFiles.delete('D:/w/brand-new.txt')
+await call(route, 'list', {})
+const killedParked = gate(exec('pwsh', { command: "Remove-Item -LiteralPath 'D:/w/brand-new.txt' -Force" }), next)
+await wait(30)
+const killedListed = await call(route, 'list', {})
+await call(route, 'decide', { id: killedListed.value.changes[killedListed.value.changes.length - 1].id, action: 'accept' })
+check('the removal of a fresh file is accepted', (await killedParked).kind === 'allow')
+const bornRows = (await call(route, 'history', { sessionId: 's1' })).value.entries
+  .filter((entry) => entry.path === 'D:/w/brand-new.txt')
+check('created and removed in one turn leaves no row to read', bornRows.length === 0)
+
+/* ---- silencing one conversation ---- */
+// The settings turn the plugin off for every conversation at once and the manual
+// switch still reviews and still records. This one is per conversation and means
+// it: no panel, no record, no snapshot.
+await call(route, 'list', {})
+const offSet = await call(route, 'decide', { action: 'setSessionOff', value: true, sessionId: 's1' })
+check('turning review off reports the new state', offSet.value.ok === true && offSet.value.off === true)
+check('the poll says so too', (await call(route, 'list', { sessionId: 's1' })).value.off.s1 === true)
+// Written down, not just held in memory: a switch that forgets at the next restart
+// is a switch nobody trusts. The file lives beside the snapshot directories rather
+// than inside one, so "clear this conversation's history" cannot resurrect review.
+const offFile = join(snapshotRoot, 'review-off.json')
+check('the switch is written down', existsSync(offFile))
+check('the file names the conversation', readFileSync(offFile, 'utf8').includes('s1'))
+check('a silenced conversation is not asked', (await gate(exec('write', { file_path: 'D:/w/silent.txt', content: 'quiet\n' }), next)).kind === 'allow')
+check('nothing was left waiting', (await call(route, 'list', { sessionId: 's1' })).value.changes.length === 0)
+const silentRows = (await call(route, 'history', { sessionId: 's1' })).value.entries
+  .filter((entry) => entry.path === 'D:/w/silent.txt')
+check('and nothing was recorded', silentRows.length === 0)
+const offBack = await call(route, 'decide', { action: 'setSessionOff', value: false, sessionId: 's1' })
+check('review can be turned back on', offBack.value.ok === true && offBack.value.off === false)
+const resumedParked = gate(exec('write', { file_path: 'D:/w/resumed.txt', content: 'again\n' }), next)
+await wait(30)
+const resumedListed = await call(route, 'list', { sessionId: 's1' })
+check('the conversation is reviewed again', resumedListed.value.changes.some((item) => item.path === 'D:/w/resumed.txt'))
+await call(route, 'decide', { id: resumedListed.value.changes[resumedListed.value.changes.length - 1].id, action: 'accept', sessionId: 's1' })
+await resumedParked
+check('a session-less silence is refused', (await call(route, 'decide', { action: 'setSessionOff', value: true })).value.missing === true)
 
 /* ---- not gated ---- */
 await call(route, 'list', {})
