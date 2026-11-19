@@ -314,6 +314,12 @@ for (const [command, expected] of [
   ['npx prettier --write D:/w/a.txt', ['D:/w/a.txt']],
   ['npx eslint --fix D:/w/a.txt D:/w/b.txt', ['D:/w/a.txt', 'D:/w/b.txt']],
   ["sed -i 's/a/b/' D:/w/a.txt", ['D:/w/a.txt']],
+  // The real command line carries plumbing and quoting: a redirect tail is not a
+  // file name, and the quotes around a path are not part of it. Both leaked into
+  // the record once, showing a target literally named `'D:/w/a.txt'` and a second
+  // one named `2>`.
+  ["npx prettier --write 'D:/w/a.txt' 2>&1", ['D:/w/a.txt']],
+  ["sed -i 's/a/b/' 'D:/w/a.txt' 2>&1 | Out-String", ['D:/w/a.txt']],
   ['npx prettier --write', []],
 ]) {
   await call(route, 'list', {})
