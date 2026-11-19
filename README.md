@@ -173,20 +173,36 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 
 `cmd /c del x`、`bash -c 'rm …'` **不**走这条判断：它们的 payload 是 shell，用一份 JS/Python 词表去判会把没列进词表的删除当成无害。这两种仍然整条确认。
 
-### 外壳包住的可弃工作不打扰
+### 外壳包住的东西按原样判
 
-`cmd /c "node D:\WP\.dsh\tmp\probe.mjs 2>&1"` 这种「用别人跑一个一次性脚本」的形状，每天都在出现。它里面**所有能看出来的路径都落在 `.dsh/` 或系统临时目录**——这些位置本来就被跳过，删了写了都不问。以前外壳会把这层信息盖住：`cmd /c` 读作「把代码交出去跑」，整条就成了一个没有文件名的命令记录，于是每次都要点。
+`cmd /c "node D:\WP\.dsh\tmp\probe.mjs 2>&1"` 这种「用别人跑一个一次性脚本」的形状，每天都在出现。以前外壳会把这层信息盖住：`cmd /c` 读作「把代码交出去跑」，整条就成了一个没有文件名的命令记录，于是每次都弹。
 
-现在会先把外壳剥开看一眼：
+现在会把外壳剥开，**按剥开后的命令重判一次**，规则与裸跑完全相同：
 
-- `cmd`、`powershell`、`pwsh`、`bash`、`sh`、`zsh` 后面跟 `/c`、`/k`、`-c`、`-Command` 时，取后面的整段当 payload
-- payload 里**除程序本身以外**的每个像路径的词，都必须在 `.dsh/` 或临时目录里
-- 至少要有一个这样的路径（`cmd /c evil.exe`、`cmd /c "echo hi"` 这种看不出落点的，照样问）
-- 出现 `$`、`%`、`..` 一律不认（运行期才算出来的名字、环境变量、路径穿越都可能指到别处）
+- `cmd`、`powershell`、`pwsh`、`bash`、`sh`、`zsh` 后面跟 `/c`、`/k`、`-c`、`-Command` 时，取后面的整段当 payload；套几层都能剥（最多 3 层）
+- payload 里**所有能看出来的路径都落在 `.dsh/` 或系统临时目录** → 直接放行，日志写 `shell-scratch`（这些位置本来就被跳过，删了写了都不问）。含 `$`、`%`、`..` 的一律不算
+- payload 自己**看不出写入也看不出删除**（`node xxx.mjs`、`evil.exe`、`echo hi`、`git status`、`git clean -fdx` 之外的 git 写操作照问）→ 放行。**这一条是关键：外壳不许比裸跑更严**。裸跑 `node test\gate.test.mjs` 一直是被放行的，套个 `cmd /c` 反而弹窗，那才是噪音的来源
+- payload **认得出写入或删除**（`del`、`Remove-Item`、`cp`/`copy`、`>` 重定向、`git reset --hard`）→ 照问，和裸跑一模一样
 
-全部满足就直接放行，日志里写 `shell-scratch` 而不是笼统的「没认出破坏性」。`cmd /c del D:\WP\a.txt`、`cmd /c "node D:\WP\real.mjs"`、`cmd /c "... probe.mjs" ; del D:\WP\a.txt` 这类照常弹。`cscript`、`wscript`、`mshta`、`-EncodedCommand` 也不走这条（前者后面跟的是文件名，后者是 base64，都读不出来）。
+`cscript`、`wscript`、`mshta`、`-EncodedCommand` 不走这条（前者后面跟的是文件名，后者是 base64，都读不出来）。
+
+引号只包住 payload 的前半段时（`cmd /c "del D:\WP\a.txt" 2>&1`），尾部的重定向**不会**让引号失效。以前这里只认「整段都被引号包住」，`2>&1` 一加就认不出，于是整行当成程序路径、删除直接放过 —— 这是会真的丢文件的漏判，现在只把引号之间那一段脱掉，后面的尾巴原样保留。
 
 一段源码只要有一处说不清，整条命令就照常弹 —— 放行的门槛是「整条命令的每个内联脚本都被判定为只读」。
+
+### 就地改写的工具
+
+`npx prettier --write src/a.ts`、`eslint --fix`、`sed -i 's/a/b/' a.txt` 这一类**既不写 `-Path`、也不打重定向**的命令，以前一条操作都解析不出来，于是静静地放过了 —— 文件真的被改了，闸门却什么都没问。这是会丢东西的方向，现在认。
+
+判据是**看标志而不是看工具**：`prettier x` 只打印、`prettier --write x` 才落盘，所以只有带 `--write`/`-w`、`--fix`、`--write`/`--apply`、`-i`/`--in-place`、`sed -i`、`perl -pi`、`-w`（gofmt/goimports）的调用才算改写；`black`、`isort`、`rustfmt`、`swiftformat` 默认就改写，反过来排除 `--check`/`--diff`/`--check-only`/`--lint`。`npx`、`bunx`、`pnpx`、`pnpm exec`、`yarn dlx`、`npm exec` 都会被跳过，看的是后面那个工具。
+
+认出来之后**只问一次，问到的是「这条命令要动文件」**：
+
+- 工具被点了名，且点的全是 `.dsh/` 或临时目录里的东西 → 不问（这些位置本来就被跳过）
+- 什么都没点名（`eslint --fix`、`prettier --write .`）→ **照问**。这是最宽的写：它会扫整个工作树。`sed -i`、`black`、`rustfmt` 这种不给文件名就读标准输入、等于什么都不做，只有它们才放行
+- 点了名但落在工作区里 → 照问。**但它点了哪些名，面板上就写哪些名**：文件条会逐个列出 `src/a.ts`、`src/b.ts`，不再是笼统的一句「命令操作」
+
+「新内容是什么」由工具决定，所以这几个文件没有原文/新文对比，文件条上写「内容由工具决定」。写「该文件内容未变」是反的——它被列出来正是因为马上要变。
 
 ## 什么不会拦
 
@@ -376,18 +392,20 @@ node test\history.test.mjs  # 快照库：去重 / 上限回收 / 跨对话隔�
 > 闸门与快照测试都把存储根指到系统临时目录（`DSH_DIFF_REVIEW_HISTORY_ROOT`）并在结束时删掉，跑测试不会往你的 `~/.dsh` 里塞任何东西。
 
 <details>
-<summary><b>闸门测试覆盖的 470 项断言</b>（点开）</summary>
+<summary><b>闸门测试覆盖的 535 项断言</b>（点开）</summary>
 
 `not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建四种）、同一命令里赋值后写出的变量（`$t = 'one'; Set-Content -Value $t`、反引号转义还原、`$p = 'D:/w/a.txt'; Remove-Item $p` 解析成真实文件、`$dir` 参与路径拼接、`"hello $n"` 插值）、运行期才算出来的值不再弹（`$t = 'a' + 'b'`、`$env:USERNAME`、`$js > a.txt`）、按形状识别的改写命令（`Set-Item`/`Rename-Item`/`New-Item`/`Tee-Object`/`Export-Csv`/`[IO.File]::Delete`/`cmd /c del`/`iex`/`Invoke-Expression`/`node -e`/`python -c`/`powershell -EncodedCommand`/`git clean`/`git checkout --`/管道右端无目标）且参数是字面量时仍出真 diff、形状命中但没有文件名的条目（`iex`/`git clean`/管道右端）标记为命令级且不带路径（`op === 'shell'`、`displayPath` 为空，避免把动词当成文件名）、只碰一个已知文件且内容看不见的写入放行、`-WhatIf`/`Get-ChildItem`/`Write-Host`/`New-Object`/`Add-Type`/`Clear-Host`/`git status`/`node --version` 放行、通配与变量目标的命令级确认（`$p`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、脚本块里的删除（`if (...) { ... }`、`foreach (...) { ... }`、`& { ... }`）、同一命令内赋值参与路径解析、逗号并列多个目标、同一文件被写两次时顶栏只出现一次而两个不同文件按顺序都出现、`$env:TEMP` 目标按临时目录放行、自我豁免、临时目录豁免、工作区 `.dsh/` 整个目录豁免且不误豁免 `.dsh-tmp`/`.dshtmp`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起、**全部允许**（同一轮里后续写入直接放行且诊断记为 `allow-all`、文件被删除或改名仍照问而 `Clear-Content` 直接过、`turn/end` 与新一轮提问都不动这个开关、关掉开关不需要有待审项、关掉之后的下一次写入重新挂起、**按对话记**——开在一个对话上不会放行另一个、关掉一个不会动另一个、不带对话的开关请求被拒绝 `missing`）、同一条命令里写出来又删掉的临时文件直接放行而删掉一个本来就存在的文件仍照问、**一个对话的改动不会被另一个对话看到或决定**（`list` 只回本会话、`detail`/`decide` 对别的会话返回 `missing` 且记录仍挂着）、**还原链路**（接受过的写入出现在历史里且带 `accepted` 状态与可用快照、还原后文件回到原文、第二次还原被拒 `already-restored`、文件在审查之后又被改过则拒绝还原 `stale` 且新内容保留、已拒绝的改动不给还原 `not-applied`、删除可以还原且字节真的回来了、别的对话既看不到这些历史也还原不了、不存在的 id 返回 `missing`）、**多文件审查**（一条命令碰两个文件只挂起一次、`files` 里两条、`detail.files` 各带自己的 rows 与新文与路径、接受后放行）、**二进制**（`.png` 被识别成 `binary`、不给行数、报 `0 → 1` 字节、`reviewable` 为真、不说「无法预知」、接受后放行）、**纯格式与纯换行**（重新缩进标 `note === 'formatting'`、CRLF 重写标 `note === 'line-endings'`，两种都仍可接受）、**按参数判定**（`mcp__fs__write_file` 被拦且新文能出 diff、`mcp__fs__read_file` 放行、`grep({pattern: 'write'})` 放行、`write_log({level, message})` 无路径放行）、**内联脚本只读识别**（`node -e` 读文件打印长度、`node -p process.version`、`python -c` 读文件打印、`sys.stdout.write` 打印、`console.log('write this to stdout')`、`readdirSync` 列表、`csv.reader` 读表共七种放行；`writeFileSync`、`appendFileSync`、`promises.unlink`、`open(...,'w')`、`shutil.copy`、`os.replace`、`child_process.execSync`、`eval(payload)` 共八种照常挂起并标 `shell-command`；一条只读脚本配一条写入脚本时整条仍挂起；**当初引发这次改动的「读 YAML 打印两个长度」那条命令不再挂起**）。
 **`.NET` 按归属判定**：`[SHA256]::Create()`、`SHA256]::Create()` 后接 `ComputeHash`、`ReadAllBytes` + `Encoding::UTF8.GetString`、`Path]::GetFileName` 四种只碰内存的调用都放行；路径是表达式的 `[System.IO.File]::WriteAllText($p, …)` 仍挂起；当初被误拦的那条算哈希命令不再挂起且队列清空。
 **步骤清单**：管道脚本挂起后 `steps` 非空、每一步括号都平衡、`(… | ForEach-Object { … }) -join ''` 合并成一步而不是碎成四段、没有一步只剩一个括号。
-**外壳收窄**：`cmd /c`、`bash -c`、`powershell -Command` 包住的 payload 全部落在 `.dsh/` 或临时目录时直接放行且诊断记 `shell-scratch`；同样的外壳包住真实路径（`cmd /c "del D:/w/a.txt"`、`cmd /c "node D:/w/real.mjs"`）、用 `..` 往外跳、可执行程序名（`cmd /c "evil.exe"`）、看不出落点（`cmd /c "echo hi"`）、以及半惰性（`cmd /c "… probe.mjs" ; del D:/w/a.txt`）仍照常挂起；整个外壳被括号包起来（`(cmd /c "del …")`）时照样识别，惰性的放行、动真实文件的挂起。
+**外壳收窄**：`cmd /c`、`bash -c`、`powershell -Command` 包住的 payload 全部落在 `.dsh/` 或临时目录时直接放行且诊断记 `shell-scratch`；payload 自己看不出写入或删除时，外壳与裸跑同判（`cmd /c "node D:/w/real.mjs"`、`cmd /c "evil.exe"`、`cmd /c "echo hi"` 都放行——裸跑它们本来就被放行，外壳不许更严）；payload 认得出写入或删除时照问（`cmd /c "del D:/w/a.txt"`、`copy`、`>` 重定向、`bash -c "rm D:/w/a.txt"`、半惰性的 `cmd /c "… probe.mjs" ; del D:/w/a.txt`）；套多层外壳（`cmd /c cmd /c "del …"`）仍能剥到底；整个外壳被括号包起来（`(cmd /c "del …")`）时照样识别。
 **分组括号**：`(Get-Process | Out-String)`、`Get-Process | Out-String)`、`(… | Format-Table -AutoSize | Out-String)`、`(Get-Content x -Raw | ConvertFrom-Json).version`、`Write-Host hi)` 五条都判为读。
+**就地改写**：`prettier --write`、`eslint --fix`、`stylelint --fix`、`biome check --write`、`sed -i`、`sed -Ei`、`sed -i.bak`、`perl -pi -e`、`black`、`isort`、`gofmt -w`、`clang-format -i`、`rustfmt`、`pnpm exec prettier --write`、`yarn dlx prettier --write` 全部挂起并可接受；`prettier --check`、`prettier`（无标志）、`sed -n '1,5p'`、`black --check`、`rustfmt --check`、`tsc --noEmit`、`npm run build` 全部放行；点名 `.dsh/` 或临时目录的改写放行，点整个工作树（`eslint --fix` 无文件、`prettier --write .`）照问。
+**`%VAR%` 展开**：`cmd /c "del %TEMP%\a.txt" 2>&1` 放行且无待审项；`%USERPROFILE%`、未定义变量、`Remove-Item "%TEMP%\…"` 解析成真实临时路径后按临时目录丢弃。
 
 </details>
 
 <details>
-<summary><b>面板测试的 10 组覆盖 + 快照库 103 项断言</b>（点开）</summary>
+<summary><b>面板测试的 12 组覆盖 + 快照库 123 项断言</b>（点开）</summary>
 
 用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch，共 10 组：`empty diag`、`unified + full`、`multi-file review`、删除措辞与目录条目与全屏按钮、`scroll sync`、`command-level review`、`allow-all-switch`、`session-scoped title`、`guide artwork`，中间夹着历史屏幕、**按轮次分组的历史**、**面板内编辑器**、**历史总数与两个清空按钮**，最后是 `client render smoke`。
 

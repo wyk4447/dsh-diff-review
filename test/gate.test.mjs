@@ -233,6 +233,109 @@ check('shell env temp target is skipped', (await parkedEnvTemp).kind === 'allow'
 const listedEnvTemp = await call(route, 'list', {})
 check('shell env temp target leaves nothing pending', listedEnvTemp.value.changes.length === 0)
 
+// cmd spells the same thing `%TEMP%`, and cmd expands it before the command runs,
+// so a throwaway delete written that way names the OS temp directory exactly as
+// `$env:TEMP` does. Left unexpanded it matched no known location and every
+// `cmd /c "del %TEMP%\a.txt"` cleanup stopped for approval.
+if (typeof process.env.TEMP === 'string' && process.env.TEMP !== '') {
+  await call(route, 'list', {})
+  const parkedCmdTemp = gate(exec('pwsh', { command: 'cmd /c "del %TEMP%\\probe-cmd.txt" 2>&1' }), next)
+  check('cmd percent-temp delete is skipped', (await parkedCmdTemp).kind === 'allow')
+  const listedCmdTemp = await call(route, 'list', {})
+  check('cmd percent-temp delete leaves nothing pending', listedCmdTemp.value.changes.length === 0)
+
+  // ...but a `%NAME%` that expands to somewhere real outside scratch/temp is a
+  // write like any other, and an unknown one is unknowable: both still park.
+  const parkedCmdProfile = gate(exec('pwsh', { command: 'cmd /c "del %USERPROFILE%\\a.txt" 2>&1' }), next)
+  await wait(30)
+  const listedCmdProfile = await call(route, 'list', {})
+  check('cmd percent-var delete outside scratch parks', listedCmdProfile.value.changes.length === 1)
+  await call(route, 'decide', { id: listedCmdProfile.value.changes[0].id, action: 'reject' })
+  check('cmd percent-var delete reject denies', (await parkedCmdProfile).kind === 'deny')
+
+  await call(route, 'list', {})
+  const parkedCmdUnknown = gate(exec('pwsh', { command: 'cmd /c "del %DSH_NO_SUCH_VAR%\\a.txt" 2>&1' }), next)
+  await wait(30)
+  const listedCmdUnknown = await call(route, 'list', {})
+  check('cmd unknown percent-var parks', listedCmdUnknown.value.changes.length === 1)
+  await call(route, 'decide', { id: listedCmdUnknown.value.changes[0].id, action: 'reject' })
+  check('cmd unknown percent-var reject denies', (await parkedCmdUnknown).kind === 'deny')
+
+  // A PowerShell cmdlet naming its target with cmd's spelling resolves the same
+  // way, so `skipTemp` sees a temp path and the command stays quiet.
+  await call(route, 'list', {})
+  const parkedCmdletTemp = gate(exec('pwsh', { command: 'Remove-Item "%TEMP%\\probe-cmdlet.txt" -Force' }), next)
+  check('a cmdlet target spelled with percent-temp is skipped', (await parkedCmdletTemp).kind === 'allow')
+}
+
+// Formatters and linters asked to rewrite in place name no `-Path`/`-Value` and
+// print no redirection, so they used to arrive with no ops at all and were waved
+// through — a real write the gate could not see. The flag is what decides: the
+// same tool without it only reads and prints.
+for (const command of [
+  'npx prettier --write D:/w/a.txt',
+  'npx eslint --fix D:/w/a.txt',
+  'npx stylelint --fix D:/w/a.css',
+  "sed -i 's/a/b/' D:/w/a.txt",
+  "perl -pi -e 's/a/b/' D:/w/a.txt",
+  'black D:/w/a.py',
+  'gofmt -w D:/w/main.go',
+  'pnpm exec prettier --write D:/w/a.ts',
+]) {
+  await call(route, 'list', {})
+  const parkedRewriter = gate(exec('pwsh', { command }), next)
+  await wait(30)
+  const listedRewriter = await call(route, 'list', {})
+  check(`an in-place rewriter parks ${command}`, listedRewriter.value.changes.length === 1)
+  await call(route, 'decide', { id: listedRewriter.value.changes[0].id, action: 'accept' })
+  check(`an in-place rewriter accept allows ${command}`, (await parkedRewriter).kind === 'allow')
+}
+
+// The read-only spelling of the same tools touches no file, so it stays silent.
+for (const command of [
+  'npx prettier --check D:/w/a.txt',
+  'npx prettier D:/w/a.txt',
+  "sed -n '1,5p' D:/w/a.txt",
+  'black --check D:/w/a.py',
+  'rustfmt --check D:/w/main.rs',
+  'pnpm exec tsc --noEmit',
+  'npm run build',
+]) {
+  await call(route, 'list', {})
+  const clearRewriter = await gate(exec('pwsh', { command }), next)
+  check(`a read-only lint run does not park ${command}`, clearRewriter.kind === 'allow')
+}
+
+// The tool's output is its own decision, but *which files it was handed* is on
+// the command line. The record has to name them — otherwise the panel said
+// "command, result unknown" and the reviewer could not tell what was about to
+// change, even when the command said `a.txt` in plain sight.
+for (const [command, expected] of [
+  ['npx prettier --write D:/w/a.txt', ['D:/w/a.txt']],
+  ['npx eslint --fix D:/w/a.txt D:/w/b.txt', ['D:/w/a.txt', 'D:/w/b.txt']],
+  ["sed -i 's/a/b/' D:/w/a.txt", ['D:/w/a.txt']],
+  ['npx prettier --write', []],
+]) {
+  await call(route, 'list', {})
+  const namedParked = gate(exec('pwsh', { command }), next)
+  await wait(30)
+  const namedListed = await call(route, 'list', {})
+  const named = namedListed.value.changes.length === 1 ? namedListed.value.changes[0] : undefined
+  // A sweep names no file of its own: the record is command-level, and the strip
+  // is drawn from `targets` only when there is something real to name.
+  const namedPaths = named !== undefined && Array.isArray(named.targets) && named.fileless !== true
+    ? named.targets.map((item) => item.path).join(',')
+    : ''
+  check(`an in-place rewriter names its files ${command}`, named !== undefined
+    && namedPaths === expected.join(','))
+  // A sweep names nothing, so there is no file strip to draw and no per-file
+  // restore: it stays a command-level review with no path of its own.
+  check(`an in-place sweep stays command level ${command}`, named !== undefined
+    && (expected.length > 0 || named.fileless === true))
+  await call(route, 'decide', { id: named.id, action: 'accept' })
+  check(`an in-place named accept allows ${command}`, (await namedParked).kind === 'allow')
+}
+
 // A comma-separated list can sit in one argument: `Remove-Item 'a.txt','b.txt'`.
 // The commas are outside the quotes, so each name needs unquoting on its own.
 await call(route, 'list', {})
@@ -594,17 +697,15 @@ for (const command of [
   check(`the pass says why ${command}`, listedInert.value.diag.reason === 'shell-scratch')
 }
 
-// Unwrapping must not turn into a bypass. The same wrapper around a path outside
-// the disposable roots still parks, and so does a payload with no nameable path
-// at all: `cmd /c evil.exe` names nothing this parser can clear, and a mixed
-// command is only as inert as its least inert statement.
+// Unwrapping must not turn into a bypass. A payload that names a removal or a
+// write keeps its ops, so the wrapper parks exactly like the bare command does —
+// and a mixed command is only as disposable as its least disposable statement.
 for (const command of [
   'cmd /c "del D:/w/a.txt"',
-  'cmd /c "node D:/w/real.mjs"',
-  'cmd /c "node D:/w/.dsh/../real.mjs"',
-  'cmd /c "evil.exe"',
-  'cmd /c "echo hi"',
-  'cmd /c "node D:/w/.dsh/tmp/probe.mjs" ; del D:/w/a.txt',
+  'cmd /c "node D:/w/.dsh/../real.mjs" ; del D:/w/a.txt',
+  'cmd /c "echo hi > D:/w/a.txt"',
+  'cmd /c "copy D:/w/a.txt D:/w/b.txt"',
+  'bash -c "rm D:/w/a.txt"',
 ]) {
   const notInert = await parkShell(command)
   check(`a shell host around real work still parks ${command}`, notInert.item !== undefined)
@@ -612,6 +713,60 @@ for (const command of [
     await call(route, 'decide', { id: notInert.item.id, action: 'accept' })
     await notInert.parked
   }
+}
+
+// The other half of the same rule, and the reason it exists: a wrapper must never
+// be *stricter* than the command it wraps. `node D:/w/real.mjs` on its own is let
+// through — the interpreter's arguments do not name anything this parser can read
+// as a write — so `cmd /c "node D:/w/real.mjs"` has to be let through too. Before
+// this, every probe written as `cmd /c "… node.exe test\gate.test.mjs 2>&1"`
+// stopped for approval while the identical bare command ran untouched, which is
+// what made the wrapper look like noise.
+for (const command of [
+  'cmd /c "node D:/w/real.mjs"',
+  'cmd /c "evil.exe"',
+  'cmd /c "echo hi"',
+  'cmd /c "node D:/w/real.mjs 2>&1"',
+]) {
+  await call(route, 'list', {})
+  const cleared = await gate(exec('pwsh', { command }), next)
+  check(`a wrapper is no stricter than the bare command ${command}`, (await cleared).kind === 'allow')
+  const listedCleared = await call(route, 'list', {})
+  check(`no panel was raised for ${command}`, listedCleared.value.changes.length === 0)
+}
+
+// A redirect tail after the quoted payload used to hide it. `cmd /c "del x" 2>&1`
+// splits into `"del x"` and `2>&1`, so the payload no longer ends in a quote, the
+// quoted form went unrecognised, and `stripQuotes` did nothing — the whole line
+// stayed one quoted token that reads as a program path. The removal then ran with
+// no panel at all. The tail is now peeled off the quotes instead of disqualifying
+// them, so a real removal still parks however its output is redirected.
+for (const command of [
+  'cmd /c "del D:/w/a.txt" 2>&1',
+  'cmd /c "del D:/w/a.txt" 2>nul',
+  'cmd /c "del D:/w/a.txt" >nul',
+  'cmd /c "copy D:/w/a.txt D:/w/b.txt" 2>&1',
+  'cmd /c "rd D:/w/dir" 2>&1',
+]) {
+  const redirected = await parkShell(command)
+  check(`a redirect tail does not hide the payload ${command}`, redirected.item !== undefined)
+  if (redirected.item !== undefined) {
+    await call(route, 'decide', { id: redirected.item.id, action: 'accept' })
+    await redirected.parked
+  }
+}
+
+// The same peel must not cost the disposable cases: a redirected probe under the
+// scratch root is still disposable work.
+for (const command of [
+  'cmd /c "del D:/w/.dsh/tmp/y.txt" 2>&1',
+  'cmd /c "node D:/w/.dsh/tmp/probe.mjs" 2>&1',
+]) {
+  await call(route, 'list', {})
+  const redirectedInert = await gate(exec('pwsh', { command }), next)
+  check(`a redirected disposable command still passes ${command}`, (await redirectedInert).kind === 'allow')
+  const listedRedirected = await call(route, 'list', {})
+  check(`no panel was raised for ${command}`, listedRedirected.value.changes.length === 0)
 }
 
 // A .NET call whose arguments are literals is still knowable, so it gets a diff

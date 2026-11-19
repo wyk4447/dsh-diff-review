@@ -366,6 +366,53 @@ async function main() {
   if (!out.includes('0 → 64 B')) throw new Error('a binary file in the strip did not report its bytes')
   console.log('multi-file review: OK')
 
+  // 2b-2) An in-place rewriter: the command names its files, but their new text
+  // is the tool's to decide, so there is nothing to diff. Saying "this file was
+  // left unchanged" here was the exact opposite of the truth — the file is on
+  // the list precisely because it is about to change.
+  React.forcedView = 'unified'
+  listPayload = {
+    ok: true,
+    value: {
+      changes: [
+        {
+          id: 'c20',
+          sessionId: 's1',
+          tool: 'pwsh',
+          displayPath: 'D:/w/a.js, D:/w/b.js',
+          op: 'update',
+          added: 0,
+          removed: 0,
+          oldLineCount: 0,
+          newLineCount: 0,
+          truncated: false,
+          reviewable: false,
+          reason: 'inplace',
+        },
+      ],
+      diag: null,
+    },
+  }
+  detailPayload = {
+    ok: true,
+    value: {
+      change: { id: 'c20' },
+      files: [
+        { path: 'D:/w/a.js', op: 'update', kind: 'text', computed: false, opaque: true, truncated: false, added: 0, removed: 0, oldLineCount: 0, newLineCount: 0, bytesBefore: 12, bytesAfter: null, before: '', after: '', rows: [] },
+        { path: 'D:/w/b.js', op: 'update', kind: 'text', computed: false, opaque: true, truncated: false, added: 0, removed: 0, oldLineCount: 0, newLineCount: 0, bytesBefore: 20, bytesAfter: null, before: '', after: '', rows: [] },
+      ],
+    },
+  }
+  await poll()
+  out = await render()
+  if (process.env.DUMP) console.log('INPLACE OUT:', out)
+  if (!out.includes('a.js') || !out.includes('b.js')) throw new Error('an in-place rewrite did not name its files')
+  if (out.includes('该文件内容未变')) throw new Error('an in-place rewrite was reported as unchanged')
+  if (out.includes('命令操作，无法预知最终内容')) throw new Error('a named in-place rewrite was called an anonymous command')
+  const opaqueCount = out.split('内容由工具决定').length - 1
+  if (opaqueCount < 3) throw new Error('the panel did not say the content is the tool\'s to decide (got ' + opaqueCount + ')')
+  console.log('in-place rewrite: OK')
+
   // 2c) A removed file used to arrive as a flat block of `-` lines under a heading
   // that only said "the file will be removed" — how much went with it was the one
   // fact missing. A folder is the same question one level up: it has no lines at
