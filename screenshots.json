@@ -1,10 +1,16 @@
 {
   "screenshots": [
-    "assets/screenshot-1.png",
-    "assets/screenshot-2.png",
-    "assets/screenshot-3.png",
-    "assets/screenshot-4.png",
-    "assets/screenshot-5.png",
-    "assets/screenshot-6.png"
+    "assets/screenshot-01-unified.png",
+    "assets/screenshot-02-new-file.png",
+    "assets/screenshot-03-full.png",
+    "assets/screenshot-04-full-replace.png",
+    "assets/screenshot-05-edit.png",
+    "assets/screenshot-06-command.png",
+    "assets/screenshot-07-delete-file.png",
+    "assets/screenshot-08-delete-directory.png",
+    "assets/screenshot-09-multi.png",
+    "assets/screenshot-10-inplace.png",
+    "assets/screenshot-11-history.png",
+    "assets/screenshot-12-empty.png"
   ]
 }
