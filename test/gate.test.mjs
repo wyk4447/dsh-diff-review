@@ -342,6 +342,48 @@ for (const [command, expected] of [
   check(`an in-place named accept allows ${command}`, (await namedParked).kind === 'allow')
 }
 
+// A formatter wrapped in a shell still names its files. The shell carries the
+// command; it does not decide which paths the tool is handed. The same command
+// bare has always listed `a.txt`, so the wrapped form used to fall behind it and
+// showed "command, result unknown" instead.
+await call(route, 'list', {})
+const wrappedParked = gate(exec('pwsh', { command: 'cmd /c "npx prettier --write D:/w/a.txt"' }), next)
+await wait(30)
+const wrappedListed = await call(route, 'list', {})
+const wrapped = wrappedListed.value.changes.length === 1 ? wrappedListed.value.changes[0] : undefined
+check('a wrapped formatter still names its file', wrapped !== undefined
+  && Array.isArray(wrapped.targets)
+  && wrapped.targets.length === 1
+  && wrapped.targets[0].path === 'D:/w/a.txt')
+check('a wrapped formatter is reviewed as an in-place rewrite', wrapped !== undefined
+  && wrapped.reason === 'inplace')
+await call(route, 'decide', { id: wrapped.id, action: 'accept' })
+check('a wrapped formatter accept allows', (await wrappedParked).kind === 'allow')
+
+// The rewritten content is the tool's decision, so the entry has a before text
+// but no after text and no proof to restore by. It still belongs in "this turn":
+// the reviewer approved this file by name.
+const wrappedHistory = await call(route, 'history', { sessionId: 's1' })
+const wrappedEntries = wrappedHistory.value.entries.filter((entry) => entry.path === 'D:/w/a.txt'
+  && entry.verify == null)
+check('an in-place entry reaches the history', wrappedEntries.length > 0)
+check('an in-place entry keeps its before text', wrappedEntries.every((entry) => entry.restorable === true
+  || entry.beforeBytes > 0))
+
+// A wrapped removal stays command level: which files `del` reaches is decided by
+// the shell at run time, not by this parser at review time.
+await call(route, 'list', {})
+const wrappedDeleteParked = gate(exec('pwsh', { command: 'cmd /c "del D:/w/a.txt"' }), next)
+await wait(30)
+const wrappedDeleteListed = await call(route, 'list', {})
+const wrappedDelete = wrappedDeleteListed.value.changes.length === 1
+  ? wrappedDeleteListed.value.changes[0]
+  : undefined
+check('a wrapped removal stays command level', wrappedDelete !== undefined
+  && wrappedDelete.fileless === true)
+await call(route, 'decide', { id: wrappedDelete.id, action: 'accept' })
+check('a wrapped removal accept allows', (await wrappedDeleteParked).kind === 'allow')
+
 // A comma-separated list can sit in one argument: `Remove-Item 'a.txt','b.txt'`.
 // The commas are outside the quotes, so each name needs unquoting on its own.
 await call(route, 'list', {})
