@@ -194,6 +194,14 @@ function serialize(node) {
     .sort()
     .map((key) => `<${key}=${props[key]}>`)
     .join('')
+  // Whether a thing can be reached from the keyboard is part of what it is. A
+  // row that answers a click but cannot be focused is not a button, whatever it
+  // looks like, so the role and the place in the tab order are dumped beside
+  // the class name.
+  const a11yTags = [
+    typeof props.role === 'string' ? `<role=${props.role}>` : '',
+    typeof props.tabIndex === 'number' ? `<tabIndex=${props.tabIndex}>` : '',
+  ].join('')
   // A textarea's text lives in `value`, which the children walk never sees. The
   // editor's whole promise is that the box holds the model's after-text, so the
   // value is dumped alongside the class to make that assertable.
@@ -208,7 +216,7 @@ function serialize(node) {
   if (typeof props.onScroll === 'function') {
     React.scrollers.push({ element: props.ref && props.ref.current, onScroll: props.onScroll })
   }
-  return className + dataTags + valueTag + serialize(node.children)
+  return className + dataTags + a11yTags + valueTag + serialize(node.children)
 }
 
 async function settle() {
@@ -999,6 +1007,41 @@ async function main() {
   React.forcedBools = null
   React.forcedList = null
   console.log('history totals and clear buttons: OK')
+
+  // 8) the keyboard, the narrow column, and a failure that can be put away.
+  // A row that answers a click has to answer a keyboard too: a panel that only
+  // works with a mouse is a panel that some readers cannot use at all.
+  listPayload = {
+    ok: true,
+    value: {
+      changes: [
+        { id: 'k1', sessionId: 's1', tool: 'write', displayPath: 'D:/w/a.js', op: 'update', added: 1, removed: 0, oldLineCount: 3, newLineCount: 4, truncated: false, reviewable: true },
+        { id: 'k2', sessionId: 's1', tool: 'write', displayPath: 'D:/w/b.js', op: 'create', added: 2, removed: 0, oldLineCount: 0, newLineCount: 2, truncated: false, reviewable: true },
+      ],
+      diag: null,
+      allowAll: {},
+      turns: { s1: 1 },
+      historyBySession: {},
+    },
+  }
+  await poll()
+  out = await render()
+  if (!out.includes('role=button')) throw new Error('a clickable row was not reachable from the keyboard')
+  if (!out.includes('tabIndex=0')) throw new Error('a clickable row had no place in the tab order')
+  // The hint is always in the tree; the stylesheet decides whether the column is
+  // too narrow to show two panes side by side.
+  if (!out.includes('dshr-narrow-hint')) throw new Error('the narrow-column hint was missing')
+
+  // A failure the host refused stays on screen until the reader puts it away.
+  // It used to be cleared by the next good answer, and a reader who looked away
+  // came back to a panel that had swallowed the reason their write failed.
+  listPayload = { ok: false, error: { code: 'forbidden', message: 'forbidden' } }
+  await poll()
+  out = await render()
+  if (!out.includes('dshr-note-row')) throw new Error('the failure was not drawn as a row of its own')
+  if (!out.includes('dshr-note-text')) throw new Error('the failure had no text of its own')
+  if (!out.includes('宿主拒绝了这个请求')) throw new Error('the failure was not written for a reader')
+  console.log('keyboard, narrow column and dismissible failure: OK')
 
   console.log('client render smoke: OK')
 }

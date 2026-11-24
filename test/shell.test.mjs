@@ -63,6 +63,14 @@ check('a numbered stdout is unknown', writes('node a.js 1> a.txt', 'a.txt', (ite
 check('every stream at once is unknown', writes('node a.js *> a.txt', 'a.txt', (item) => item.opaque === true))
 check('the cmd spelling of every stream is unknown', writes('node a.js &> a.txt', 'a.txt', (item) => item.opaque === true))
 check('a stderr append is a write', writes('cmd 2>> e.txt', 'e.txt', (item) => item.opaque === true))
+// `>&` merges every stream into one file, and it used to be read as `2>&1` —
+// a rename of one stream into another, which writes nothing. The line was also
+// cut in half at the `&`, so the operator and the file name ended up in two
+// different statements and neither half named a file.
+check('a merged stream with a space writes the file', writes('cmd >& a.txt', 'a.txt', (item) => item.opaque === true))
+check('a merged stream without a space writes the file', writes('cmd >&a.txt', 'a.txt', (item) => item.opaque === true))
+check('a merged stream of a program writes the file', writes('node a.js >& out.txt', 'out.txt', (item) => item.opaque === true))
+check('a merged stream into a descriptor writes nothing', allowed('node a.js >& 2'))
 check('the null device is not a file', allowed('Get-Date > $null'))
 check('the cmd null device is not a file', allowed('cmd > NUL'))
 
@@ -75,6 +83,23 @@ check('a quoted cmdlet name is the cmdlet', deletes("'remove-item' D:/w/a.txt", 
 check('a group around a cmdlet is the cmdlet', deletes('(Remove-Item "D:/w/a.txt")', 'D:/w/a.txt'))
 check('a sub-expression is the cmdlet', deletes('$(Remove-Item "D:/w/a.txt")', 'D:/w/a.txt'))
 check('a pipeline source is not a file name', ops('Remove-Item (Get-ChildItem "D:/w/*.txt")').every((item) => item.wildcard === true))
+
+/* ---- a script handed to a host ---- */
+// `.\deploy.ps1` was caught because the script was the command itself. The same
+// script handed to a host — `powershell -File deploy.ps1`, `bash deploy.sh` —
+// is the same program, and the text is in the file rather than on the command
+// line, so it is confirmed as a whole.
+check('a script handed to powershell is seen', writes('powershell -File deploy.ps1', 'deploy', (item) => item.shape === true))
+check('a script handed to pwsh is seen', writes('pwsh -File build.ps1', 'build', (item) => item.shape === true))
+check('a script behind another flag is seen', writes('powershell -ExecutionPolicy Bypass -File deploy.ps1', 'deploy', (item) => item.shape === true))
+check('a script handed to bash is seen', writes('bash deploy.sh', 'deploy.sh', (item) => item.shape === true))
+check('a script handed to sh is seen', writes('sh build.sh', 'build.sh', (item) => item.shape === true))
+check('a script handed to zsh is seen', writes('zsh tool.zsh', 'tool.zsh', (item) => item.shape === true))
+// The short options of a POSIX shell may be written in one bundle: `bash -lc` is
+// `-l` plus `-c`, and the command line is the argument that follows.
+check('a bundled command flag is seen', writes('bash -lc "rm a.txt"', 'bash', (item) => item.shape === true))
+check('a plain command flag is seen', writes('bash -c "rm a.txt"', 'bash', (item) => item.shape === true))
+check('inline code is not a script file', allowed('bash -c "node test.mjs"'))
 
 /* ---- writes whose text nobody can see ---- */
 // The file is named and is about to be replaced. The reviewer is asked about the
@@ -94,7 +119,6 @@ check('a pull changes the working tree', writes('git pull', 'git', (item) => ite
 check('a merge changes the working tree', writes('git merge topic', 'git', (item) => item.shape === true))
 check('a rebase changes the working tree', writes('git rebase topic', 'git', (item) => item.shape === true))
 check('a clean removes files', ops('git clean -fdx').some((item) => item.op === 'delete'))
-check('a commit only touches the repository', allowed('git commit -m x'))
 check('a diff only reads', allowed('git diff'))
 
 /* ---- packaging and unpacking ---- */
@@ -125,7 +149,27 @@ check('a transcript writes a file', writes('Start-Transcript -Path log.txt', 'lo
 check('stopping a transcript writes nothing', allowed('Stop-Transcript'))
 check('unblocking a file does not change it', allowed('Block-File a.txt'))
 check('a permission change names the file', writes('Set-Acl -Path D:/w/a.txt -AclObject $acl', 'D:/w/a.txt'))
-check('formatting a volume is destructive', ops('Format-Volume').length > 0)
+// `Format-*` shapes something for a person to look at. `Format-Volume` writes to
+// a volume, not to a file, and no diff could show it — asking about it was a
+// prompt the reviewer could not refuse in any useful way.
+check('formatting a volume writes no file', allowed('Format-Volume -DriveLetter D'))
+check('formatting a table writes no file', allowed('Format-Table'))
+
+/* ---- an argument that is an expression ---- */
+// `(Get-ChildItem '*.txt')` is one argument, but the tokenizer works on spaces and
+// hands it over in pieces. Read piece by piece, the panel showed
+// `(Get-ChildItem` as a file that was about to be deleted — a name no reviewer
+// could make sense of. The expression is kept whole instead.
+const grouped = ops("Remove-Item (Get-ChildItem 'D:/w/*.txt')")
+check('an expression is one target', grouped.length === 1)
+check('an expression is not read as a file name', grouped.length === 1 && grouped[0].path.includes('Get-ChildItem'))
+check('an expression that deletes still deletes', grouped.length === 1 && grouped[0].op === 'delete')
+const joined = ops("Remove-Item ('D:/w/' + 'a.txt')")
+check('a joined expression is one target', joined.length === 1)
+check('a joined expression keeps its text', joined.length === 1 && joined[0].path.includes('+'))
+// The value of a flag is still the value of a flag: `-AclObject $acl` names an
+// object, not a file.
+check('a flag value is not a path', ops('Set-Acl -Path D:/w/a.txt -AclObject $acl').length === 1)
 
 /* ---- what the gate deliberately does not read ---- */
 // These are known holes, recorded so that the choice stays visible: they are
@@ -141,6 +185,15 @@ for (const command of [
   'make',
   'git remote add origin https://example.com/r.git',
   'git log --output=f.txt',
+  // A git command that only records what is already in the working tree writes
+  // the repository's own bookkeeping and changes no file the user works with.
+  // Asking about it would put a command with no file list in front of the
+  // reviewer on every commit. A git command that *does* rewrite the working
+  // tree — checkout, reset, restore, clean, merge, pull, rebase — is gated.
+  'git commit -m x',
+  'git add .',
+  'git tag v1',
+  'git config user.name x',
 ]) {
   check(`not gated on purpose: ${command}`, allowed(command))
 }

@@ -1,6 +1,6 @@
 # dsh-diff-review
 
-[![version](https://img.shields.io/badge/version-1.0.4-18BAE5)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.0.5-18BAE5)](CHANGELOG.md)
 [![dsh](https://img.shields.io/badge/dsh-%E2%89%A50.2.1--rc.1-D6F3FA)](https://github.com/wyk4447/dsh-diff-review#%E5%AE%89%E8%A3%85)
 [![license](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 
@@ -146,14 +146,16 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 
 另外覆盖：
 
-- 常见别名（`ri`/`rm`/`del`/`erase`/`rd`/`rmdir`/`clc`/`cli`/`ren`/`rni`/`mi`/`mv`/`sc`/`ac`/`cpi`/`cp`/`tee`/`ni`/`si`/`sp`/`mkdir`/`md`）与重定向 `>` `>>` `1>` `2>` `2>>` `*>` `&>`（`2>&1` 是合流，不写文件；`> $null` 是丢弃，也不算写）
+- 常见别名（`ri`/`rm`/`del`/`erase`/`rd`/`rmdir`/`clc`/`cli`/`ren`/`rni`/`mi`/`mv`/`sc`/`ac`/`cpi`/`cp`/`tee`/`ni`/`si`/`sp`/`mkdir`/`md`）与重定向 `>` `>>` `1>` `2>` `2>>` `*>` `&>` `>&`（`2>&1` 是合流，不写文件；`> $null` 是丢弃，也不算写；`>&file` 是 bash 的写法，会写文件）
 - **全限定路径一样认**：`C:\Windows\System32\cmd.exe /c del a.txt` 里的 `cmd` 就是 `cmd`，带不带领格都一样
 - **包装器会先剥掉**：`sudo rm a.txt`、`env FOO=1 rm a.txt`、`xargs rm`、`time rm a.txt` 剥完包装词再按原样判
-- **`git` 按子命令判**：`pull`/`merge`/`rebase`/`cherry-pick`/`revert`/`checkout`/`switch`/`clean` 会改工作区 → 拦；`status`/`diff`/`log`/`show`/`branch -a`/`stash list` 只读 → 放行；`commit`/`tag` 只动 `.git/` 里的元数据 → 放行
+- **`git` 按子命令判**：`pull`/`merge`/`rebase`/`cherry-pick`/`revert`/`checkout`/`switch`/`clean` 会改工作区 → 拦；`status`/`diff`/`log`/`show`/`branch -a`/`stash list` 只读 → 放行；`commit`/`add`/`tag`/`config` 只动 `.git/` 里的账本，不改工作区里的文件 → 放行（直接往 `.git/` 里写文件仍然拦）
 - **打包解包会改一堆文件**：`tar -xf`、`unzip`、`7z x`、`jar xf` → 拦
 - **copy/move/rename 的第二个位置参数是目标路径，不是内容**：`Copy-Item a.txt b.txt` 审的是 `b.txt`（新内容由工具决定），`Move-Item a.txt b.txt` 审的是「a 没了、b 有了」
+- **交给宿主去跑的脚本照问**：`powershell -File deploy.ps1`、`pwsh -File build.ps1`、`bash deploy.sh`、`sh build.sh` —— 脚本的内容不在命令行上，照样按命令级审查（1.0.5 起）
 - **脚本块里的命令**同样算数：`if (Test-Path $t) { Remove-Item $t -Force }`、`foreach (...) { ... }`、`& { ... }` —— 藏在里面的删除不会漏
 - **写目标要运行时才算出来的命令照问**：`Set-Content -Path (Join-Path $dir 'a.txt') -Value 'hi'`、`Set-Content -Path $out -Value 'hi'` —— 连位置都是运行时拼的，最需要你知道它在写什么；面板把原命令摆出来，不列假文件名（1.0.4 起）
+- **参数本身是个表达式时不列假文件名**：`Remove-Item (Get-ChildItem '*.txt')` 是一个参数，位置是运行时才算的。面板会把它当成「目标未知」的命令级审查，而不是把 `(Get-ChildItem` 当成一个要删的文件摆给你看（1.0.5 起）
 - 带 `-WhatIf` 的干跑、只读管道、`git status` / `git log` / `git diff` 一律放行
 - **分组括号不算动词的一部分**：`(Get-Process | Out-String)` 这种一条管道包在括号里的写法，按 `|` 切句后首尾会粘上 `(` 和 `)`。判定前会先剥掉它们，否则 `Out-String)` 看着不像 `out-string`、却命中了 `out-` 变异前缀，把「格式化一张表」报成了写操作。同理 `(Get-Content x | ConvertFrom-Json).version`、`Get-Process | Format-Table | Out-String)` 都是读
 
@@ -256,8 +258,9 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 - **生成物目录**：`__pycache__`、`node_modules`、`dist`、`build`、`out`、`target`、`coverage`、`.venv`、`vendor` 等（工具自己产出的东西，问你也是白问）
 - **插件自己的源码**（否则插件改坏了就再也修不回来）
 - **装依赖与跑构建**：`npm install`、`pnpm add`、`pip install`、`cargo build`、`go build`、`tsc`、`dotnet build`、`make` —— 装依赖和跑构建的动静太大、目标太散，问你也答不上来
+- **只做排版的命令**：`Format-Table`、`Format-List`、`Format-Volume` —— `Format-*` 是给人看的形状，`Format-Volume` 写的是卷不是文件，diff 里根本没有它（1.0.5 起）
 
-除此之外，只要落盘就一定会先问你。`.git/` 不在豁免之列——`hooks/pre-commit` 下次提交就会执行。
+除此之外，只要落盘就一定会先问你。`.git/` 不在豁免之列——直接往 `.git/` 里写文件（`hooks/pre-commit` 之类）会拦；`git commit`/`git add`/`git tag` 这类只动账本、不碰工作区里文件的命令不拦。
 
 **文件已知、内容由工具决定时也会问**：像 `Get-Process | Out-File report.csv`、`Copy-Item a.txt b.txt` 这种，插件算不出新内容，但它**知道**哪个文件会被写。于是照样停下来问，只是面板上说「内容由工具决定」而不是编一份 diff 出来——**问的是「这个文件会被改吗」，不是「这两段文字差在哪」**。原地改写的工具（`prettier --write`、`eslint --fix`）走的是同一条路。
 
@@ -273,6 +276,10 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 - **审查属于它所在的对话**：待审队列进程内共享，一个面板就是一块公共审查台——左边列出的是**所有**对话挂起的改动，点哪一条就审哪一条。但**权限按对话算**：面板每次都带上这条改动**自己所属的对话**去问宿主，宿主核对不上就当它不存在（`missing`），所以一个面板不能拿着 A 对话的改动去冒充 B 对话；而**历史与还原是严格按对话分的**——每个对话的快照在自己的目录里，别的对话既列不出它的历史，也还原不了它的文件
 - **字体**：代码区 13px/20px，等宽栈 `JetBrains Mono → Fira Code → Cascadia Code → Consolas`，关闭连字（连字会把 `!=`、`->` 画变形）；正文系统无衬线
 - **配色**：全部走宿主的 `--dsw-alias-file-diff-*` token，跟随亮/暗主题自动切换，不写死颜色
+- **对比度**：主按钮沿用宿主的成功色（亮绿 `#22c55e`），字却用宿主最深的那档墨色而不是白字——白字压在这条绿上只有 2.3:1，看不清；宿主最深墨压上去是 8.6:1（1.0.5 起）
+- **键盘可用**：能点的行（文件条目、历史条目、轮次标题）都能 Tab 过去，Enter 和空格等同点击（1.0.5 起）
+- **窄栏**：侧栏窄到两栏对照挤不下时，上下堆叠，并给一行提示说明这是窄栏的选择（1.0.5 起）
+- **失败提示**：失败会写成一句能看懂的话（「宿主拒绝了这个请求」而不是 `forbidden`），并且**留到你自己把它关掉为止**——下一次轮询成功不会顺手抹掉它（1.0.5 起）
 - **空态**：显示提示，并把闸门自检信息收进一张卡片——闸门检查了多少次、最近一次是什么工具与结果、布防状态、心跳龄、待审条数、当前会话与工作目录、它见过的工具与调用形态，以及最近 12 次判定的流转。面板不弹的时候，先看这张卡。
 
 ![空态与闸门自检卡](assets/screenshot-12-empty.png)
@@ -430,14 +437,14 @@ dsh plugin add github:wyk4447/dsh-diff-review
 node test\gate.test.mjs      # 闸门：拦截 / 放行 / 接受 / 拒绝 / 中断 / 自我豁免 / 兜底 / 还原 / 多文件 / 二进制 / 格式化 / 面板内改写 / 历史统计 / 清空 / 同轮合并 / 本会话不审核
 node test\render.test.cjs    # 面板：空态 / 改动视图 / 全文视图 / 滚动同步 / 多文件 / 命令级 / 全部允许 / 本会话不审核 / 历史分组 / 编辑器 / 清空按钮 / 侧栏图标
 node test\history.test.mjs   # 快照库：去重 / 上限回收 / 跨对话隔离 / 索引损坏 / 可还原性判定 / 占用统计 / 按轮清空 / 同轮合并成一条
-node test\shell.test.mjs     # 命令识别矩阵：重定向 / 管道 / git / 打包解包 / 包装器 / copy-move-rename / 旗标 / 长脚本 / 「有意不拦」清单
+node test\shell.test.mjs     # 命令识别矩阵：重定向 / 管道 / git / 打包解包 / 包装器 / copy-move-rename / 旗标 / 长脚本 / 交给宿主跑的脚本 / 表达式参数 / 「有意不拦」清单
 node test\switches.test.mjs  # 审核开关：读写 / 删键 / 两窗口互不覆盖 / 损坏文件 / 写失败必须上报
 node test\routes.test.mjs    # 路由层：状态码 / 原型污染 / 空 body / 超大 body / 错误码
 node scripts\smoke.mjs       # 装配冒烟：包内容 / manifest / 宿主模块导出 / 装上之后的路由、闸门、接管、会话订阅
 node scripts\lint.mjs        # 体检：每个文件能解析 / 中英词典键完全一致 / 每个查表都有键
 ```
 
-断言数：闸门 **566**、快照库 **128**、命令矩阵 **68**、开关 **23**、路由 **29**（合计 **960**），面板 **13 组**，冒烟 **39** 项，体检 **107** 项。
+断言数：闸门 **566**、快照库 **128**、命令矩阵 **91**、开关 **23**、路由 **29**（合计 **1010**），面板 **14 组**，冒烟 **39** 项，体检 **120** 项。
 
 > `npm test` / `npm run check` 把上面这些按顺序跑一遍；但**在含非 ASCII 字符的路径下 `npm` 认不出 `package.json`**（Windows 乱码路径报「Can't find package.json」）。本仓库所在路径就是这种，所以直接用 `node test\xxx.mjs`。
 >
