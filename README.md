@@ -1,6 +1,6 @@
 # dsh-diff-review
 
-[![version](https://img.shields.io/badge/version-1.0.3-18BAE5)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.0.4-18BAE5)](CHANGELOG.md)
 [![dsh](https://img.shields.io/badge/dsh-%E2%89%A50.2.1--rc.1-D6F3FA)](https://github.com/wyk4447/dsh-diff-review#%E5%AE%89%E8%A3%85)
 [![license](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 
@@ -145,6 +145,7 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 - **打包解包会改一堆文件**：`tar -xf`、`unzip`、`7z x`、`jar xf` → 拦
 - **copy/move/rename 的第二个位置参数是目标路径，不是内容**：`Copy-Item a.txt b.txt` 审的是 `b.txt`（新内容由工具决定），`Move-Item a.txt b.txt` 审的是「a 没了、b 有了」
 - **脚本块里的命令**同样算数：`if (Test-Path $t) { Remove-Item $t -Force }`、`foreach (...) { ... }`、`& { ... }` —— 藏在里面的删除不会漏
+- **写目标要运行时才算出来的命令照问**：`Set-Content -Path (Join-Path $dir 'a.txt') -Value 'hi'`、`Set-Content -Path $out -Value 'hi'` —— 连位置都是运行时拼的，最需要你知道它在写什么；面板把原命令摆出来，不列假文件名（1.0.4 起）
 - 带 `-WhatIf` 的干跑、只读管道、`git status` / `git log` / `git diff` 一律放行
 - **分组括号不算动词的一部分**：`(Get-Process | Out-String)` 这种一条管道包在括号里的写法，按 `|` 切句后首尾会粘上 `(` 和 `)`。判定前会先剥掉它们，否则 `Out-String)` 看着不像 `out-string`、却命中了 `out-` 变异前缀，把「格式化一张表」报成了写操作。同理 `(Get-Content x | ConvertFrom-Json).version`、`Get-Process | Format-Table | Out-String)` 都是读
 
@@ -170,16 +171,20 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 
 ### 算不出来 → 只确认命令本身
 
-路径或内容只能由 shell 运行时决定时，**只在会删东西、或同时碰多个文件时才弹**：
+路径或内容只能由 shell 运行时决定时，插件分两种情况处理，**两种都会弹**：
 
-| 情形 | 举例 |
-|---|---|
-| 通配符 | `*` `?` `[` `]` |
-| 没被赋值的变量 | `$env:TEMP\x`、`$(...)`、`${...}` |
-| 运行期才算出来的值 | `$t = 'a' + 'b'`、`Get-Date \| Out-File f` |
-| 属性 / 索引访问 | `$a.Length` |
+| 情形 | 举例 | 面板怎么说 |
+|---|---|---|
+| **路径算不出来** | 通配符 `*` `?` `[` `]`、没被赋值的变量 `$env:TEMP\x`、`$(...)`、`${...}`、运行期拼出来的路径 `(Join-Path $dir 'a.txt')` | 「命令要动的目标要运行时才知道」+ 原命令 |
+| **路径知道、内容算不出来** | `Set-Content -Value $x`、`$js > file`、`Get-Process \| Out-File report.csv` | 「内容由工具决定」+ 文件名 |
 
-一个已知文件、内容看不见的写入（`Set-Content -Value $x`、`$js > file`）**直接放行** —— 让人审批自己看不见的字节是问不出答案的噪音。
+> **1.0.4 的修复**：第一类里「路径算不出来」又分两种——**路径是通配符或变量**（看得见大概位置）与**路径要运行时才算出来**（连位置都是算的）。后者以前被当成噪音整条丢掉，命令**直接执行、一次都没问**：`Set-Content -Path (Join-Path $dir 'hello.txt') -Value 'hi'` 现在会挂起等你裁决，面板把原命令摆出来。点「拒绝」就真的不写。
+
+两个例外：
+
+- **`$env:NAME` 能查**：`Remove-Item "$env:TEMP\a.txt"` 会还原成真实路径 —— 落在临时目录的照放行，落在别处的照常问
+- **逗号并列多目标**（`Remove-Item 'a.txt','b.txt'`）各自独立解析
+- 文件名里本来就有的 `$`（如 `a$b.txt`）不算展开，仍按真实路径审查
 
 真要弹时，面板先给「这条命令会做这些事」的步骤清单（`切换目录` / `设置` / `写入 <文件>` / `删除 <文件>` / `交给别的程序`），原命令折在下面点一下就展开 —— 不再是把三十行单行命令整条甩给你读。
 
@@ -424,7 +429,7 @@ node scripts\smoke.mjs       # 装配冒烟：包内容 / manifest / 宿主模�
 node scripts\lint.mjs        # 体检：每个文件能解析 / 中英词典键完全一致 / 每个查表都有键
 ```
 
-断言数：闸门 **561**、快照库 **128**、命令矩阵 **68**、开关 **23**、路由 **29**（合计 **809**），面板 **13 组**，冒烟 **39** 项，体检 **106** 项。
+断言数：闸门 **566**、快照库 **128**、命令矩阵 **68**、开关 **23**、路由 **29**（合计 **960**），面板 **13 组**，冒烟 **39** 项，体检 **107** 项。
 
 > `npm test` / `npm run check` 把上面这些按顺序跑一遍；但**在含非 ASCII 字符的路径下 `npm` 认不出 `package.json`**（Windows 乱码路径报「Can't find package.json」）。本仓库所在路径就是这种，所以直接用 `node test\xxx.mjs`。
 >
@@ -433,9 +438,9 @@ node scripts\lint.mjs        # 体检：每个文件能解析 / 中英词典键�
 > 闸门与快照测试都把存储根指到系统临时目录（`DSH_DIFF_REVIEW_HISTORY_ROOT`）并在结束时删掉，跑测试不会往你的 `~/.dsh` 里塞任何东西。
 
 <details>
-<summary><b>闸门测试覆盖的 561 项断言</b>（点开）</summary>
+<summary><b>闸门测试覆盖的 566 项断言</b>（点开）</summary>
 
-`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建四种）、同一命令里赋值后写出的变量（`$t = 'one'; Set-Content -Value $t`、反引号转义还原、`$p = 'D:/w/a.txt'; Remove-Item $p` 解析成真实文件、`$dir` 参与路径拼接、`"hello $n"` 插值）、运行期才算出来的值不再弹（`$t = 'a' + 'b'`、`$env:USERNAME`、`$js > a.txt`）、按形状识别的改写命令（`Set-Item`/`Rename-Item`/`New-Item`/`Tee-Object`/`Export-Csv`/`[IO.File]::Delete`/`cmd /c del`/`iex`/`Invoke-Expression`/`node -e`/`python -c`/`powershell -EncodedCommand`/`git clean`/`git checkout --`/管道右端无目标）且参数是字面量时仍出真 diff、形状命中但没有文件名的条目（`iex`/`git clean`/管道右端）标记为命令级且不带路径（`op === 'shell'`、`displayPath` 为空，避免把动词当成文件名）、只碰一个已知文件且内容看不见的写入放行、`-WhatIf`/`Get-ChildItem`/`Write-Host`/`New-Object`/`Add-Type`/`Clear-Host`/`git status`/`node --version` 放行、通配与变量目标的命令级确认（`$p`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、脚本块里的删除（`if (...) { ... }`、`foreach (...) { ... }`、`& { ... }`）、同一命令内赋值参与路径解析、逗号并列多个目标、同一文件被写两次时顶栏只出现一次而两个不同文件按顺序都出现、`$env:TEMP` 目标按临时目录放行、自我豁免、临时目录豁免、工作区 `.dsh/` 整个目录豁免且不误豁免 `.dsh-tmp`/`.dshtmp`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起、**全部允许**（同一轮里后续写入直接放行且诊断记为 `allow-all`、文件被删除或改名仍照问而 `Clear-Content` 直接过、`turn/end` 与新一轮提问都不动这个开关、关掉开关不需要有待审项、关掉之后的下一次写入重新挂起、**按对话记**——开在一个对话上不会放行另一个、关掉一个不会动另一个、不带对话的开关请求被拒绝 `missing`）、同一条命令里写出来又删掉的临时文件直接放行而删掉一个本来就存在的文件仍照问、**一个对话的改动不会被另一个对话看到或决定**（`list` 只回本会话、`detail`/`decide` 对别的会话返回 `missing` 且记录仍挂着）、**还原链路**（接受过的写入出现在历史里且带 `accepted` 状态与可用快照、还原后文件回到原文、第二次还原被拒 `already-restored`、文件在审查之后又被改过则拒绝还原 `stale` 且新内容保留、已拒绝的改动不给还原 `not-applied`、删除可以还原且字节真的回来了、别的对话既看不到这些历史也还原不了、不存在的 id 返回 `missing`）、**多文件审查**（一条命令碰两个文件只挂起一次、`files` 里两条、`detail.files` 各带自己的 rows 与新文与路径、接受后放行）、**二进制**（`.png` 被识别成 `binary`、不给行数、报 `0 → 1` 字节、`reviewable` 为真、不说「无法预知」、接受后放行）、**纯格式与纯换行**（重新缩进标 `note === 'formatting'`、CRLF 重写标 `note === 'line-endings'`，两种都仍可接受）、**按参数判定**（`mcp__fs__write_file` 被拦且新文能出 diff、`mcp__fs__read_file` 放行、`grep({pattern: 'write'})` 放行、`write_log({level, message})` 无路径放行）、**内联脚本只读识别**（`node -e` 读文件打印长度、`node -p process.version`、`python -c` 读文件打印、`sys.stdout.write` 打印、`console.log('write this to stdout')`、`readdirSync` 列表、`csv.reader` 读表共七种放行；`writeFileSync`、`appendFileSync`、`promises.unlink`、`open(...,'w')`、`shutil.copy`、`os.replace`、`child_process.execSync`、`eval(payload)` 共八种照常挂起并标 `shell-command`；一条只读脚本配一条写入脚本时整条仍挂起；**当初引发这次改动的「读 YAML 打印两个长度」那条命令不再挂起**）。
+`not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建四种）、同一命令里赋值后写出的变量（`$t = 'one'; Set-Content -Value $t`、反引号转义还原、`$p = 'D:/w/a.txt'; Remove-Item $p` 解析成真实文件、`$dir` 参与路径拼接、`"hello $n"` 插值）、运行期才算出来的值照问并标成「内容由工具决定」（`$t = 'a' + 'b'`、`$env:USERNAME`、`$js > a.txt`）、按形状识别的改写命令（`Set-Item`/`Rename-Item`/`New-Item`/`Tee-Object`/`Export-Csv`/`[IO.File]::Delete`/`cmd /c del`/`iex`/`Invoke-Expression`/`node -e`/`python -c`/`powershell -EncodedCommand`/`git clean`/`git checkout --`/管道右端无目标）且参数是字面量时仍出真 diff、形状命中但没有文件名的条目（`iex`/`git clean`/管道右端）标记为命令级且不带路径（`op === 'shell'`、`displayPath` 为空，避免把动词当成文件名）、只碰一个已知文件且内容看不见的写入照问并标成「内容由工具决定」、**路径要运行时才算出来的写照问**（`Set-Content -Path (Join-Path $dir 'a.txt') -Value 'hi'` 与 `Set-Content -Path $out -Value 'hi'` 都会挂起、标 `computed-target`、面板不列假文件名、点拒绝真的没写）、`-WhatIf`/`Get-ChildItem`/`Write-Host`/`New-Object`/`Add-Type`/`Clear-Host`/`git status`/`node --version` 放行、通配与变量目标的命令级确认（`$p`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、脚本块里的删除（`if (...) { ... }`、`foreach (...) { ... }`、`& { ... }`）、同一命令内赋值参与路径解析、逗号并列多个目标、同一文件被写两次时顶栏只出现一次而两个不同文件按顺序都出现、`$env:TEMP` 目标按临时目录放行、自我豁免、临时目录豁免、工作区 `.dsh/` 整个目录豁免且不误豁免 `.dsh-tmp`/`.dshtmp`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起、**全部允许**（同一轮里后续写入直接放行且诊断记为 `allow-all`、文件被删除或改名仍照问而 `Clear-Content` 直接过、`turn/end` 与新一轮提问都不动这个开关、关掉开关不需要有待审项、关掉之后的下一次写入重新挂起、**按对话记**——开在一个对话上不会放行另一个、关掉一个不会动另一个、不带对话的开关请求被拒绝 `missing`）、同一条命令里写出来又删掉的临时文件直接放行而删掉一个本来就存在的文件仍照问、**一个对话的改动不会被另一个对话看到或决定**（`list` 只回本会话、`detail`/`decide` 对别的会话返回 `missing` 且记录仍挂着）、**还原链路**（接受过的写入出现在历史里且带 `accepted` 状态与可用快照、还原后文件回到原文、第二次还原被拒 `already-restored`、文件在审查之后又被改过则拒绝还原 `stale` 且新内容保留、已拒绝的改动不给还原 `not-applied`、删除可以还原且字节真的回来了、别的对话既看不到这些历史也还原不了、不存在的 id 返回 `missing`）、**多文件审查**（一条命令碰两个文件只挂起一次、`files` 里两条、`detail.files` 各带自己的 rows 与新文与路径、接受后放行）、**二进制**（`.png` 被识别成 `binary`、不给行数、报 `0 → 1` 字节、`reviewable` 为真、不说「无法预知」、接受后放行）、**纯格式与纯换行**（重新缩进标 `note === 'formatting'`、CRLF 重写标 `note === 'line-endings'`，两种都仍可接受）、**按参数判定**（`mcp__fs__write_file` 被拦且新文能出 diff、`mcp__fs__read_file` 放行、`grep({pattern: 'write'})` 放行、`write_log({level, message})` 无路径放行）、**内联脚本只读识别**（`node -e` 读文件打印长度、`node -p process.version`、`python -c` 读文件打印、`sys.stdout.write` 打印、`console.log('write this to stdout')`、`readdirSync` 列表、`csv.reader` 读表共七种放行；`writeFileSync`、`appendFileSync`、`promises.unlink`、`open(...,'w')`、`shutil.copy`、`os.replace`、`child_process.execSync`、`eval(payload)` 共八种照常挂起并标 `shell-command`；一条只读脚本配一条写入脚本时整条仍挂起；**当初引发这次改动的「读 YAML 打印两个长度」那条命令不再挂起**）。
 **`.NET` 按归属判定**：`[SHA256]::Create()`、`SHA256]::Create()` 后接 `ComputeHash`、`ReadAllBytes` + `Encoding::UTF8.GetString`、`Path]::GetFileName` 四种只碰内存的调用都放行；路径是表达式的 `[System.IO.File]::WriteAllText($p, …)` 仍挂起；当初被误拦的那条算哈希命令不再挂起且队列清空。
 **步骤清单**：管道脚本挂起后 `steps` 非空、每一步括号都平衡、`(… | ForEach-Object { … }) -join ''` 合并成一步而不是碎成四段、没有一步只剩一个括号。
 **外壳收窄**：`cmd /c`、`bash -c`、`powershell -Command` 包住的 payload 全部落在 `.dsh/` 或临时目录时直接放行且诊断记 `shell-scratch`；payload 自己看不出写入或删除时，外壳与裸跑同判（`cmd /c "node D:/w/real.mjs"`、`cmd /c "evil.exe"`、`cmd /c "echo hi"` 都放行——裸跑它们本来就被放行，外壳不许更严）；payload 认得出写入或删除时照问（`cmd /c "del D:/w/a.txt"`、`copy`、`>` 重定向、`bash -c "rm D:/w/a.txt"`、半惰性的 `cmd /c "… probe.mjs" ; del D:/w/a.txt`）；套多层外壳（`cmd /c cmd /c "del …"`）仍能剥到底；整个外壳被括号包起来（`(cmd /c "del …")`）时照样识别。
@@ -515,6 +520,7 @@ Select-String -Path ~\.dsh\logs\diff-review.log -Pattern '"tool":"write"'
 - **闸门**：`tools/pre-execute` 的 async waterfall。挂起时只 await 一个 Promise，同时监听 `exec.signal`，宿主等多久都不会 abandon 我们的 promise。
 - **拦谁**：不靠工具名白名单。`write`/`edit`/`pwsh` 是精确 diff 的已知工具，其余一律按参数判定——工具名或 `op`/`action`/`type` 参数里出现变异动词，**且**参数里有真实路径，两者同时成立才拦。这样第三方 MCP 文件服务也能被拦，而 `grep({pattern: "write"})` 不会被误拦。
 - **多文件**：一条命令按路径分组，每组独立 replay 出 before/after，`files[]` 随 `list` 只发摘要、随 `detail` 发全部 rows。面板切文件是本地状态，不发请求。目录不是文件：除非它是被删除的对象，否则不进 `files[]`；而「写进目录」的路径要单独记住，否则目标被剔掉之后这条命令会被误判成「只碰一个看不见的文件」而直接放行。
+- **算出来的目标**：`computed`（路径要运行时才算出来）跟通配符是两回事 —— 通配符的位置是真的、文件列表不知道；算出来的路径连位置都是算的。判据是「路径里带变量或函数调用」（`$`、`${`、`$(`、`(`）。这类目标按「形状」处理：面板给命令原文，不给假文件名，闸门照问。
 - **全屏**：侧栏自己的服务面上就有 `commandTarget()` + `toggleFullscreen(target)`，不需要另建界面。按钮只在宿主真的提供这两个方法时才画，动作包在 try/catch 里——宿主拒绝就保持原布局，不假装切换成功；按钮文案读的是 tab 自己的呈现状态，所以两边都能切。
 - **二进制 / 格式噪音**：扩展名先判 `kind`（`text`/`binary`/`sourcemap`），二进制只算字节数不读文本；文本再判 `note`（`line-endings`/`formatting`）。`computed`（有真 diff）与 `understood`（知道结果，哪怕只是字节数）分开，只有前者能驱动快照——二进制没有文本副本，所以永远不给还原。
 - **内联脚本**：`node`/`python` 带 `-e`/`-c` 时先取 payload 原文，抹掉字符串字面量与 `console.log`/`process.stdout.write`（打印不是写盘），再把标识符去掉下划线后比对写词表；`open` 的写模式靠正则带调用括号判，避免只读脚本被拦。任何一处判不清就整条照常确认，`cmd /c`、`bash -c` 不走这条捷径。

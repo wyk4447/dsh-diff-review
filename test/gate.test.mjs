@@ -214,14 +214,39 @@ for (const command of expanded) {
   check(`shell expanded target reject denies ${command}`, (await parkedExpanded).kind === 'deny')
 }
 
-// A write whose content the shell decides is not worth interrupting for: the
-// reviewer cannot judge what they cannot see, so only *deletes* stay gated in
-// that case. Parking every `Set-Content -Value $out` was pure noise.
+// A write whose *target* the shell computes at run time is still a write, and it
+// is still a write the reviewer has to be told about. `Set-Content -Path $out`
+// names no file we can show, but the file it creates is real.
+//
+// It used to be dropped as "a change nobody can see" and the command then ran
+// unreviewed. The machine test caught exactly that: an agent wrote a file, no
+// panel appeared, and the host's own sandbox card stood in for ours.
 await call(route, 'list', {})
 const parkedUnknownWrite = gate(exec('pwsh', { command: 'Set-Content -Path $out -Value hi' }), next)
-check('shell unknown write is not parked', (await parkedUnknownWrite).kind === 'allow')
+await wait(30)
 const listedUnknownWrite = await call(route, 'list', {})
-check('shell unknown write leaves nothing pending', listedUnknownWrite.value.changes.length === 0)
+check('shell write to a computed target parks', listedUnknownWrite.value.changes.length === 1)
+const computedWrite = listedUnknownWrite.value.changes[0]
+check('shell write to a computed target is a command review', computedWrite.op === 'shell' && computedWrite.reason === 'computed-target')
+check('shell write to a computed target names no file', computedWrite.displayPath === '')
+await call(route, 'decide', { id: computedWrite.id, action: 'reject' })
+check('shell write to a computed target reject denies', (await parkedUnknownWrite).kind === 'deny')
+
+// The command the machine test caught, unchanged: a folder is made, then a file
+// is written into it through a path the shell builds while it runs.
+const computedPathCommand = [
+  "$dir = 'D:/w/exists-dir'",
+  'New-Item -ItemType Directory -Force -Path $dir | Out-Null',
+  "Set-Content -Path (Join-Path $dir 'hello.txt') -Value 'hello' -Encoding utf8",
+].join('\n')
+await call(route, 'list', {})
+const parkedComputedPath = gate(exec('pwsh', { command: computedPathCommand }), next)
+await wait(30)
+const listedComputedPath = await call(route, 'list', {})
+check('a write through a computed path parks', listedComputedPath.value.changes.length === 1)
+check('a write through a computed path is a command review', listedComputedPath.value.changes[0].reason === 'computed-target')
+await call(route, 'decide', { id: listedComputedPath.value.changes[0].id, action: 'reject' })
+check('a write through a computed path reject denies', (await parkedComputedPath).kind === 'deny')
 
 // `$env:TEMP` is the one expansion the host can replay, and replaying it turns a
 // throwaway scratch delete into a path `isTempPath` recognises — so it must be
@@ -738,7 +763,12 @@ for (const command of [
   const parked = await parkShell(command)
   check(
     `shell shape confirms the command ${command}`,
-    parked.item !== undefined && parked.item.reason === 'shell-command' && parked.detail.rows.length === 0,
+    // Two wordings, one meaning: the command is the review. A shape whose target
+    // is a verb has nothing to name; a shape whose target the shell computes
+    // names a place we cannot see, and the panel says that.
+    parked.item !== undefined
+      && (parked.item.reason === 'shell-command' || parked.item.reason === 'computed-target')
+      && parked.detail.rows.length === 0,
   )
   // A shape match has no file of its own. Its `path` used to be the verb, which the
   // panel rendered as a file name — the review of `iex $code` claimed to be creating

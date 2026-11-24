@@ -652,6 +652,32 @@ async function main() {
   out = await render()
   if (!out.includes('iex $code')) throw new Error('a fileless review lost its command')
   if (out.includes('<dshr-name>')) throw new Error('a fileless review invented a file name')
+
+  // A target the shell computes at run time is its own case: the command writes
+  // something real, but not even the place is known. The panel has to say that,
+  // and it must not borrow the wording of a command whose *result* is unreadable.
+  listPayload.value.changes[0] = {
+    id: 'c3b',
+    sessionId: 's1',
+    tool: 'pwsh',
+    displayPath: '',
+    op: 'shell',
+    added: 0,
+    removed: 0,
+    oldLineCount: 0,
+    newLineCount: 0,
+    truncated: false,
+    reviewable: false,
+    reason: 'computed-target',
+    command: "Set-Content -Path (Join-Path $dir 'hello.txt') -Value 'hello'",
+    steps: [{ kind: 'write', text: "Set-Content -Path (Join-Path $dir 'hello.txt') -Value 'hello'" }],
+  }
+  detailPayload = { ok: true, value: { change: { id: 'c3b' }, rows: [], before: '', after: '' } }
+  await poll()
+  out = await render()
+  if (!out.includes('运行时才知道')) throw new Error('a computed target lost its own wording')
+  if (out.includes('无法预知最终内容')) throw new Error('a computed target borrowed the command wording')
+  console.log('computed target review: OK')
   console.log('command-level review: OK')
 
   // 5) The manual switch: it is always on screen and always says which state it
