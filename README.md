@@ -69,6 +69,14 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 
 ![命令级审查](assets/screenshot-06-command.png)
 
+### 目标要运行时才算出来的审查
+
+连**位置**都是 shell 运行时才拼出来的命令——`Set-Content -Path (Join-Path $pwd 'a.txt') -Value 'hi'`、`Set-Content -Path $out -Value 'hi'`——是最该被问的一类：插件连它要写哪个文件都不知道，最需要你知道它在写什么。
+
+面板明说「命令要动的目标要运行时才知道」，把原命令摆出来，**不列假文件名**（以前这里会出现一个叫 `(Join-Path` 的「文件」，还标着「该文件内容未变」）。点「拒绝」就真的一个字节都没写。
+
+![目标要运行时才算出来的审查](assets/screenshot-13-computed-target.png)
+
 ### 删除级审查
 
 `pwsh` 里的 `Remove-Item` / `rm` / `[IO.File]::Delete` 这类删除命令，面板把**将被删掉的整段原文**逐行标红列出来，一并给出原始命令行——先看清楚要没的是什么，再决定。
