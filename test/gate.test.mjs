@@ -485,13 +485,19 @@ check('shell literal overwrite has rows', Array.isArray(overwrite.detail.rows) &
 await call(route, 'decide', { id: overwrite.item.id, action: 'accept' })
 check('shell literal overwrite accept allows', (await overwrite.parked).kind === 'allow')
 
-// `-Value $x` is produced at run time. A *write* whose content nobody can see is
-// not worth interrupting for — the reviewer cannot judge it — so it goes straight
-// through. Only a delete stays gated when its content is unknowable, because that
-// cannot be undone.
-await call(route, 'list', {})
-const runtime = gate(exec('pwsh', { command: 'Set-Content -Path D:/w/a.txt -Value $x' }), next)
-check('shell runtime write is not parked', (await runtime).kind === 'allow')
+// `-Value $x` is produced at run time, so the gate cannot read the new text —
+// but it does know which file is about to be overwritten, and that is what the
+// reviewer judges: "this file is being rewritten, the new text is the tool's
+// call". The write is therefore parked as an opaque change, the same shape a
+// formatter produces. Waving it through would have let `Get-Process |
+// Out-File a.txt` and a dozen other cmdlet writes replace a file's whole
+// content without the reviewer ever seeing that the file was touched.
+const runtime = await parkShell('Set-Content -Path D:/w/a.txt -Value $x')
+check('shell runtime write is parked', runtime.item !== undefined)
+check('shell runtime write is an opaque update', runtime.item !== undefined && runtime.item.op === 'update' && runtime.item.opaque === true)
+check('shell runtime write keeps the old text', runtime.detail !== undefined && runtime.detail.before.includes('alpha'))
+await call(route, 'decide', { id: runtime.item.id, action: 'accept' })
+check('shell runtime write accept allows', (await runtime.parked).kind === 'allow')
 const listedRuntime = await call(route, 'list', {})
 check('shell runtime write leaves nothing pending', listedRuntime.value.changes.length === 0)
 
@@ -512,10 +518,13 @@ await call(route, 'decide', { id: redirect.item.id, action: 'accept' })
 check('shell literal redirect accept allows', (await redirect.parked).kind === 'allow')
 
 // A redirect whose content the shell supplies is the same shape as `-Value $x`:
-// one known file, text nobody can see, so it is no longer worth stopping for.
-await call(route, 'list', {})
-const streamed = gate(exec('pwsh', { command: '$js > D:/w/a.txt' }), next)
-check('shell runtime redirect is not parked', (await streamed).kind === 'allow')
+// one known file, text nobody can see. The file is still named, so it is parked
+// as an opaque write rather than waved through.
+const streamed = await parkShell('$js > D:/w/a.txt')
+check('shell runtime redirect is parked', streamed.item !== undefined)
+check('shell runtime redirect is an opaque update', streamed.item !== undefined && streamed.item.op === 'update' && streamed.item.opaque === true)
+await call(route, 'decide', { id: streamed.item.id, action: 'accept' })
+check('shell runtime redirect accept allows', (await streamed.parked).kind === 'allow')
 const listedStreamed = await call(route, 'list', {})
 check('shell runtime redirect leaves nothing pending', listedStreamed.value.changes.length === 0)
 
@@ -604,23 +613,30 @@ check('shell here-string interpolates a known value', hereKnown.detail !== undef
 await call(route, 'decide', { id: hereKnown.item.id, action: 'accept' })
 check('shell here-string known accept allows', (await hereKnown.parked).kind === 'allow')
 
-// No content to show, single known file, and it is only a write: not parked.
-await call(route, 'list', {})
-const hereUnknown = gate(exec('pwsh', { command: [
+// No content to show, one known file: it is parked as an opaque write. The
+// reviewer is told which file is rewritten and that the text is the tool's
+// call — the file is the part that can be judged.
+const hereUnknown = await parkShell([
   '$n = Get-Date',
   '$add = @"',
   'line $n',
   '"@',
   "[System.IO.File]::WriteAllText('D:/w/a.txt', $add)",
-].join('\n') }), next)
-check('shell here-string unknown value is not parked', (await hereUnknown).kind === 'allow')
+].join('\n'))
+check('shell here-string unknown value is parked', hereUnknown.item !== undefined)
+check('shell here-string unknown value is an opaque write', hereUnknown.item !== undefined && hereUnknown.item.opaque === true)
+await call(route, 'decide', { id: hereUnknown.item.id, action: 'accept' })
+check('shell here-string unknown value accept allows', (await hereUnknown.parked).kind === 'allow')
 
 // `$t = 'a' + 'b'` is an expression, not a literal, so `$t` stays unknown. It used
 // to be recorded as the garbage text `a'+'b` and shown to the reviewer as if that
-// were the content about to be written; now the write simply goes through unseen.
-await call(route, 'list', {})
-const builtAtRuntime = gate(exec('pwsh', { command: "$t = 'a' + 'b'\nSet-Content -Path D:/w/a.txt -Value $t" }), next)
-check('shell computed value is not parked', (await builtAtRuntime).kind === 'allow')
+// were the content about to be written; now the write is parked as an opaque
+// change instead of going through unseen.
+const builtAtRuntime = await parkShell("$t = 'a' + 'b'\nSet-Content -Path D:/w/a.txt -Value $t")
+check('shell computed value is parked', builtAtRuntime.item !== undefined)
+check('shell computed value is an opaque update', builtAtRuntime.item !== undefined && builtAtRuntime.item.op === 'update' && builtAtRuntime.item.opaque === true)
+await call(route, 'decide', { id: builtAtRuntime.item.id, action: 'accept' })
+check('shell computed value accept allows', (await builtAtRuntime.parked).kind === 'allow')
 const listedBuilt = await call(route, 'list', {})
 check('shell computed value leaves nothing pending', listedBuilt.value.changes.length === 0)
 
@@ -648,10 +664,13 @@ check('shell scripted write counts both lines', scripted.item.added === 2)
 await call(route, 'decide', { id: scripted.item.id, action: 'accept' })
 check('shell scripted write accept allows', (await scripted.parked).kind === 'allow')
 // An environment reference the plugin cannot resolve makes the text unknowable, so
-// this is the same shape as `-Value $x`: one known file, invisible content.
-await call(route, 'list', {})
-const unknownRef = gate(exec('pwsh', { command: 'Set-Content -Path D:/w/a.txt -Value "hello $env:USERNAME"' }), next)
-check('shell unknown reference is not parked', (await unknownRef).kind === 'allow')
+// this is the same shape as `-Value $x`: one known file, invisible content. The
+// file is still worth the prompt — it is the one thing the reviewer can judge.
+const unknownRef = await parkShell('Set-Content -Path D:/w/a.txt -Value "hello $env:USERNAME"')
+check('shell unknown reference is parked', unknownRef.item !== undefined)
+check('shell unknown reference is an opaque update', unknownRef.item !== undefined && unknownRef.item.op === 'update' && unknownRef.item.opaque === true)
+await call(route, 'decide', { id: unknownRef.item.id, action: 'accept' })
+check('shell unknown reference accept allows', (await unknownRef.parked).kind === 'allow')
 const listedUnknownRef = await call(route, 'list', {})
 check('shell unknown reference leaves nothing pending', listedUnknownRef.value.changes.length === 0)
 
@@ -681,21 +700,28 @@ for (const command of [
   check(`shell shape accept allows ${command}`, (await parked.parked).kind === 'allow')
 }
 
-// One known file, text only the shell produces, nothing else touched: the
-// reviewer could not judge it even if the panel opened, so it goes through.
-// These three shapes are the reason the write exemption has to be by shape
-// rather than by cmdlet name — they matched nothing the old whitelist knew, and
-// now they are recognised and deliberately let past.
+// A directory is not a file: creating one replaces no byte, so there is nothing
+// for the reviewer to judge and it goes through.
+await call(route, 'list', {})
+const unseenDirectory = gate(exec('pwsh', { command: "New-Item -Path 'D:/w/dir' -ItemType Directory" }), next)
+check('shell directory creation is not parked', (await unseenDirectory).kind === 'allow')
+const listedUnseenDirectory = await call(route, 'list', {})
+check('shell directory creation leaves nothing pending', listedUnseenDirectory.value.changes.length === 0)
+
+// A file whose text only the shell produces: the reviewer cannot read the diff,
+// but the file is named and is about to be replaced. These two shapes matched
+// nothing the old whitelist knew, and they used to be let past without a word —
+// `Get-Process | Out-File a.txt` wrote a file nobody was ever asked about. They
+// are parked as opaque writes now, the same shape a formatter produces.
 for (const command of [
-  "New-Item -Path 'D:/w/dir' -ItemType Directory",
   "'x' | Tee-Object -FilePath 'D:/w/a.txt'",
   "Get-Process | Export-Csv -Path 'D:/w/a.csv'",
 ]) {
-  await call(route, 'list', {})
-  const unseen = gate(exec('pwsh', { command }), next)
-  check(`shell invisible write is not parked ${command}`, (await unseen).kind === 'allow')
-  const listedUnseen = await call(route, 'list', {})
-  check(`shell invisible write leaves nothing pending ${command}`, listedUnseen.value.changes.length === 0)
+  const parked = await parkShell(command)
+  check(`shell invisible write is parked ${command}`, parked.item !== undefined)
+  check(`shell invisible write is opaque ${command}`, parked.item !== undefined && parked.item.opaque === true)
+  await call(route, 'decide', { id: parked.item.id, action: 'accept' })
+  check(`shell invisible write accept allows ${command}`, (await parked.parked).kind === 'allow')
 }
 
 // Whether the panel can show a diff depends on the payload, not on the shape: the

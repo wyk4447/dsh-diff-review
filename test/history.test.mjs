@@ -201,6 +201,21 @@ ok('a dropped entry leaves no before copy behind', !trimBlobs.includes(sha256('b
 ok('a dropped entry leaves no after copy behind', !trimBlobs.includes(sha256('next 0\n')))
 ok('the newest entry keeps both of its copies', trimBlobs.includes(sha256('body 209\n')) && trimBlobs.includes(sha256('next 209\n')))
 
+/* ------------------------------------------------- the index and its blobs -- */
+
+// The index is the only thing that says what the blobs mean. When the blobs
+// were collected before the index was written, a crash between the two steps
+// left the index naming copies that were already gone: the whole conversation's
+// undo stopped working, and the panel showed an empty diff instead of an
+// error. The order is index first, blobs second, and this reads the index off
+// the disk to prove the two agree.
+{
+  const onDisk = JSON.parse(readFileSync(join(trimDir, trimSession, 'index.json'), 'utf8'))
+  const named = onDisk.entries.flatMap((entry) => [entry.beforeSha, entry.afterSha]).filter((hash) => typeof hash === 'string')
+  ok('the index on disk names copies', named.length > 0)
+  ok('every copy the index names is on disk', named.every((hash) => trimBlobs.includes(hash)))
+}
+
 /* --------------------------------------------------------- turn and after -- */
 
 const turnRoot = join(root, 'turn')
@@ -273,6 +288,13 @@ ok('a corrupt index does not throw on record', broken.record({
 }) !== undefined)
 ok('the store recovers for later reads', broken.list('bad').length === 1)
 
+// A damaged index is not the same thing as an empty one. The conversation's
+// undo was thrown away by something, and the panel has to be able to say so
+// rather than showing a tidy empty history.
+ok('the damaged index is kept for a look', readdirSync(brokenDir).some((name) => name.startsWith('index.json.corrupt-')))
+ok('the stats say the index was damaged', broken.stats('bad').corrupt === true)
+ok('an intact index does not claim damage', store.stats('session-a').corrupt === false)
+
 /* -------------------------------------------------------------------- forget -- */
 
 ok('forget reports success', store.forget('session-b') === true)
@@ -282,7 +304,13 @@ ok('forgetting twice is harmless', store.forget('session-b') === true)
 
 /* -------------------------------------------------------------------- bytes -- */
 
-const big = 'x'.repeat(3 * 1024 * 1024)
+// The byte ceiling and the character ceiling have to agree. The host truncates a
+// file's text at 800,000 characters before it is handed to the store, and UTF-8
+// spends up to four bytes on one character, so the byte ceiling has to be four
+// times the character ceiling. When it was smaller, a file of Chinese text at
+// the character limit was silently kept without a blob — the entry looked
+// restorable in the panel and could not be restored.
+const big = 'x'.repeat(5 * 1024 * 1024)
 const oversize = record({ id: 'c40', before: big, truncated: false })
 ok('an oversized snapshot is still recorded', oversize !== undefined)
 ok('an oversized snapshot cannot be restored', oversize.restorable === false)

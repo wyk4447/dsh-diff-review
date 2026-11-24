@@ -5,7 +5,7 @@ const source = fs.readFileSync(require('node:path').join(__dirname, '..', 'lib',
 
 let registered = {}
 let tabDefinition = null
-const store = { current: { changes: [], detail: null, detailId: null, error: null, ready: true, diag: null } }
+const store = { current: { changes: [], details: {}, error: null, ready: true, diag: null, allowAll: {}, history: {}, turns: {}, sessionIds: [], off: {} } }
 let listPayload = { ok: true, value: { changes: [], diag: null } }
 let detailPayload = { ok: true, value: { missing: true } }
 let historyPayload = { ok: true, value: { entries: [] } }
@@ -91,7 +91,11 @@ const windowStub = {
   ticks: [],
   setInterval: (fn) => { windowStub.ticks.push(fn); return windowStub.ticks.length },
   clearInterval: () => {},
-  setTimeout: (fn) => { fn(); return 1 },
+  // Timers are queued, not run. The poller reschedules itself through a timer,
+  // so a stub that ran its callback on the spot would spin forever; the test
+  // drives the poller by running the timer it left behind.
+  timers: [],
+  setTimeout: (fn, delay) => { windowStub.timers.push({ fn, delay }); return windowStub.timers.length },
   clearTimeout: () => {},
   // The scroll lock releases on the next frame. Frames are queued, not run, so the
   // test can prove the mirror write does not bounce back before that release.
@@ -213,9 +217,17 @@ async function settle() {
 
 /** The panel only learns about the gate through the poller, like the live UI. */
 async function poll() {
-  const tick = windowStub.ticks[windowStub.ticks.length - 1]
-  if (typeof tick !== 'function') throw new Error('poller was not installed')
-  await tick()
+  // The first poll runs on its own when the panel is applied, so the test waits
+  // for it to land before it looks for the timer the poller left behind.
+  await settle()
+  // The poller reschedules itself, so the test runs the timer it left behind.
+  // The open-tab retry shares the same timer channel; it is told apart by its
+  // delay, which the panel publishes as POLL_DELAYS.
+  const delays = Object.values(plugin.POLL_DELAYS)
+  const index = windowStub.timers.findIndex((entry) => delays.includes(entry.delay))
+  if (index === -1) throw new Error('poller was not installed')
+  const entry = windowStub.timers.splice(index, 1)[0]
+  await entry.fn()
   await settle()
 }
 
@@ -836,7 +848,7 @@ async function main() {
       ],
     },
   }
-  listPayload = { ok: true, value: { changes: [], diag: null, allowAll: {}, turn: 3 } }
+  listPayload = { ok: true, value: { changes: [], diag: null, allowAll: {}, turns: { s1: 3 } } }
   React.forcedList = historyPayload.value.entries
   React.forcedBools = { 0: true }
   await poll()
@@ -945,7 +957,7 @@ async function main() {
       ],
     },
   }
-  listPayload = { ok: true, value: { changes: [], diag: null, allowAll: {}, turn: 2, history: { entries: 2, bytes: 1536 } } }
+  listPayload = { ok: true, value: { changes: [], diag: null, allowAll: {}, turns: { s1: 2 }, historyBySession: { s1: { entries: 2, bytes: 1536 } } } }
   React.forcedList = historyPayload.value.entries
   React.forcedBools = { 0: true }
   await poll()
