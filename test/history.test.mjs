@@ -6,7 +6,7 @@
  * against a temporary directory, so no test can touch a real file.
  */
 
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -548,6 +548,91 @@ ok('a pile written by an older version folds on the first read', (() => {
   const again = manual.list('n')
   return folded.length === 1 && again.length === 1
 })())
+
+/* ------------------------------------------------------- the reviewer edits -- */
+
+// "Change it myself" stores the reviewer's bytes as the new after-copy. The copy
+// the model's version produced is named by nothing after that, and it used to
+// stay on disk forever: one dead snapshot per hand edit.
+{
+  const editRoot = join(root, 'edit')
+  const editStore = createHistory({ root: editRoot, enabled: () => true })
+  editStore.record({
+    id: 'p1', sessionId: 'p', tool: 'write', path: 'D:\\w\\p.txt', op: 'update',
+    before: 'start\n', after: 'model wrote this\n', known: true,
+  })
+  const editBlobDir = join(editRoot, readdirSync(editRoot)[0], 'blobs')
+  ok('the model version is on disk before the hand edit', readdirSync(editBlobDir).includes(sha256('model wrote this\n')))
+  editStore.updateApplied('p', 'p1', 'the reviewer wrote this\n')
+  const afterEdit = readdirSync(editBlobDir)
+  ok('a hand edit stores the reviewer version', afterEdit.includes(sha256('the reviewer wrote this\n')))
+  ok('a hand edit gives the model version back', !afterEdit.includes(sha256('model wrote this\n')))
+  ok('a hand edit keeps the copy it replaced', afterEdit.includes(sha256('start\n')))
+  ok('the row still undoes to the hand-edited bytes', editStore.read('p', 'p1').after === 'the reviewer wrote this\n')
+}
+
+/* ------------------------------------------------------------ the startup sweep -- */
+
+// The writers collect their own garbage now, but a store that grew under a
+// version that did not do that keeps the dead copies forever. On a real profile
+// 46% of the bytes on disk named nothing. The sweep is the one pass that sees
+// every conversation, and it is also the one with no ordering against a second
+// Harness window — so it waits out a grace period before touching anything.
+{
+  const sweepRoot = join(root, 'sweep')
+  const sweepStore = createHistory({ root: sweepRoot, enabled: () => true })
+  sweepStore.record({
+    id: 's1', sessionId: 'sw', tool: 'write', path: 'D:\\w\\sw.txt', op: 'update',
+    before: 'keep me\n', after: 'also keep\n', known: true,
+  })
+  const sweepDir = join(sweepRoot, readdirSync(sweepRoot)[0])
+  const sweepBlobDir = join(sweepDir, 'blobs')
+  const staleName = 'deadbeef'.repeat(8)
+  const freshName = 'feedface'.repeat(8)
+  writeFileSync(join(sweepBlobDir, staleName), 'orphan\n', 'utf8')
+  writeFileSync(join(sweepBlobDir, freshName), 'fresh\n', 'utf8')
+  // Old enough to be collected, and a quiet conversation directory: the directory
+  // mtime is what says nothing is being written right now.
+  const old = new Date(Date.now() - 30 * 60 * 1000)
+  utimesSync(join(sweepBlobDir, staleName), old, old)
+  utimesSync(sweepDir, old, old)
+  const sweptCount = sweepStore.sweep()
+  const afterSweep = readdirSync(sweepBlobDir)
+  ok('the startup sweep removes an orphan', !afterSweep.includes(staleName))
+  ok('the startup sweep reports what it removed', sweptCount === 1)
+  ok('the startup sweep keeps what the index names', afterSweep.includes(sha256('keep me\n')) && afterSweep.includes(sha256('also keep\n')))
+  ok('the startup sweep leaves a fresh blob alone', afterSweep.includes(freshName))
+  ok('a swept conversation still undoes', sweepStore.read('sw', 's1').before === 'keep me\n')
+
+  // A conversation whose index never landed names nothing: its blobs are garbage.
+  const orphanRoot = join(root, 'orphan')
+  const orphanDir = join(orphanRoot, 's0000000000000000')
+  mkdirSync(join(orphanDir, 'blobs'), { recursive: true })
+  writeFileSync(join(orphanDir, 'blobs', 'cafebabe'.repeat(8)), 'lost\n', 'utf8')
+  utimesSync(join(orphanDir, 'blobs', 'cafebabe'.repeat(8)), old, old)
+  utimesSync(orphanDir, old, old)
+  const orphanStore = createHistory({ root: orphanRoot, enabled: () => true })
+  ok('a conversation with no index gives its blobs back', orphanStore.sweep() === 1)
+
+  // A damaged index is kept beside the conversation for a look. Sweeping the
+  // blobs it named would leave the kept file pointing at nothing.
+  const hurtRoot = join(root, 'hurt')
+  const hurtStore = createHistory({ root: hurtRoot, enabled: () => true })
+  hurtStore.record({
+    id: 'h1', sessionId: 'h', tool: 'write', path: 'D:\\w\\h.txt', op: 'update',
+    before: 'was\n', after: 'is\n', known: true,
+  })
+  const hurtDir = join(hurtRoot, readdirSync(hurtRoot)[0])
+  writeFileSync(join(hurtDir, 'index.json'), '{ not json', 'utf8')
+  utimesSync(join(hurtDir, 'blobs', sha256('was\n')), old, old)
+  utimesSync(hurtDir, old, old)
+  const hurtSwept = hurtStore.sweep()
+  ok('a damaged index is not swept from under its blobs', hurtSwept === 0)
+  ok('sweeping leaves the damaged index where the reader can find it', readFileSync(join(hurtDir, 'index.json'), 'utf8') === '{ not json')
+
+  const offStore = createHistory({ root: join(root, 'sweep-off'), enabled: () => false })
+  ok('a disabled store sweeps nothing', offStore.sweep() === 0)
+}
 
 /* ------------------------------------------------------------------ summary -- */
 

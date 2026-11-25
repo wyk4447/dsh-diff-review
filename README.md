@@ -1,6 +1,6 @@
 # dsh-diff-review
 
-[![version](https://img.shields.io/badge/version-1.0.6-18BAE5)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.0.7-18BAE5)](CHANGELOG.md)
 [![dsh](https://img.shields.io/badge/dsh-%E2%89%A50.2.1--rc.1-D6F3FA)](https://github.com/wyk4447/dsh-diff-review#%E5%AE%89%E8%A3%85)
 [![license](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 
@@ -354,6 +354,7 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 - **没落盘的改动不给还原**：已拒绝的、还在待审的都没有按钮（`not-applied`）
 - **读不出原文的不给还原**：超 4MB 的快照、被 `MAX_STORED_CHARS` 截断的改动只留记录，按钮不出现——用半截原文还原会把文件尾部切掉
 - 快照存在 `~/.dsh/diff-review/history/`，按对话分目录、内容寻址去重（同一份原文写两次只占一份），每对话上限 200 条 / 128MB，超了从最旧的开始删
+- **不再被引用的快照会被回收**：你自己改一版、或同一轮同文件被合并成一条时，旧的那份快照就没有任何条目再指向它了。写入方当场回收；此外每次启动会扫一遍所有对话，把安静的、超过十分钟没人动的孤儿副本删掉（十分钟是给第二个窗口留的余地——它可能刚写完副本、还没来得及写索引）
 - **索引坏了会说**：磁盘上的索引读不出来时，坏文件被改名留底（`index.json.corrupt-<时间戳>`），面板的统计里标出「这个对话的索引坏过」——而不是把一段丢掉的还原历史安安静静显示成「没有改动」
 
 **占多少、怎么清**：顶栏一直挂着一枚 `12 条 · 3.4 MB`，点它直接进「本轮改动」——数字和列表是同一个控件。列表顶部再写一遍总数，旁边是「清空全部」；每个轮次标题右边是「清空这一轮」。
@@ -428,7 +429,7 @@ dsh plugin add github:wyk4447/dsh-diff-review
     skipSelf: true       # 跳过插件自身（强烈建议保持 true）
     skipNoise: true      # 跳过生成物目录（__pycache__/node_modules/dist/.git …）
     history: true        # 抓原文快照，让已接受的改动能在「本轮改动」里还原
-    trace: true          # 写诊断日志到 ~/.dsh/logs/diff-review.log
+    trace: true          # 写诊断日志到 ~/.dsh/logs/diff-review.log（超过 5MB 自动轮转成 .1，只留一份）
     timeoutMs: 300000    # 文件审查超时（毫秒）
     shellTimeoutMs: 120000
 ```
@@ -445,7 +446,7 @@ dsh plugin add github:wyk4447/dsh-diff-review
 
 ## 自测
 
-七套离线测试 + 两个检查脚本，不连 GUI、不写真文件：
+八套离线测试 + 两个检查脚本，不连 GUI、不写真文件：
 
 ```powershell
 node test\gate.test.mjs      # 闸门：拦截 / 放行 / 接受 / 拒绝 / 中断 / 自我豁免 / 兜底 / 还原 / 多文件 / 二进制 / 格式化 / 面板内改写 / 历史统计 / 清空 / 同轮合并 / 本会话不审核
@@ -455,11 +456,12 @@ node test\shell.test.mjs     # 命令识别矩阵：重定向 / 管道 / git / �
 node test\switches.test.mjs  # 审核开关：读写 / 删键 / 两窗口互不覆盖 / 损坏文件 / 写失败必须上报
 node test\routes.test.mjs    # 路由层：状态码 / 原型污染 / 空 body / 超大 body / 错误码
 node test\command.test.mjs   # /diff-review 命令：注册 / on / off / status / 复合会话 id / 落盘
+node test\trace.test.mjs     # 诊断日志：超过 5MB 轮转成 .1 / 轮转后新行落在新文件 / 关掉时不写
 node scripts\smoke.mjs       # 装配冒烟：包内容 / manifest / 宿主模块导出 / 装上之后的路由、闸门、接管、会话订阅
 node scripts\lint.mjs        # 体检：每个文件能解析 / 中英词典键完全一致 / 每个查表都有键
 ```
 
-断言数：闸门 **569**、快照库 **128**、命令矩阵 **91**、开关 **23**、路由 **29**、命令 **21**（合计 **1036**），面板 **15 组**，冒烟 **39** 项，体检 **121** 项。
+断言数：闸门 **569**、快照库 **142**、命令矩阵 **91**、开关 **23**、路由 **29**、命令 **21**、诊断日志 **6**（合计 **1056**），面板 **15 组**，冒烟 **39** 项，体检 **122** 项。
 
 > `npm test` / `npm run check` 把上面这些按顺序跑一遍；但**在含非 ASCII 字符的路径下 `npm` 认不出 `package.json`**（Windows 乱码路径报「Can't find package.json」）。本仓库所在路径就是这种，所以直接用 `node test\xxx.mjs`。
 >
@@ -481,7 +483,7 @@ node scripts\lint.mjs        # 体检：每个文件能解析 / 中英词典键�
 </details>
 
 <details>
-<summary><b>面板测试的 15 组覆盖 + 快照库 128 项断言</b>（点开）</summary>
+<summary><b>面板测试的 15 组覆盖 + 快照库 142 项断言</b>（点开）</summary>
 
 用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch，共 15 组：`empty diag`、`unified + full`、`multi-file review`、**`in-place rewrite`**、删除措辞与目录条目与全屏按钮、`scroll sync`、`command-level review`、`allow-all-switch`、**`session-off-switch`**、`session-scoped title`、`guide artwork`、**`history totals and clear buttons`**、**`computed target review`**、**`keyboard, narrow column and dismissible failure`**，最后是 `client render smoke`。
 
@@ -509,7 +511,7 @@ node scripts\lint.mjs        # 体检：每个文件能解析 / 中英词典键�
 
 ### 日志（推荐，不依赖打开侧栏）
 
-`trace: true`（默认）时，每次闸门调用、挂起、裁决、路由拒绝都会追加一行到 `~/.dsh/logs/diff-review.log`（Windows：`C:\Users\<你>\.dsh\logs\diff-review.log`）。
+`trace: true`（默认）时，每次闸门调用、挂起、裁决、路由拒绝都会追加一行到 `~/.dsh/logs/diff-review.log`（Windows：`C:\Users\<你>\.dsh\logs\diff-review.log`）。日志超过 5MB 会轮转成 `diff-review.log.1`（只留一份，两份合计约 10MB 封顶），最新的证据永远在正在写的那个文件里。想让日志换个位置，设 `DSH_DIFF_REVIEW_TRACE_FILE`。
 
 ```powershell
 Get-Content ~\.dsh\logs\diff-review.log -Tail 30
