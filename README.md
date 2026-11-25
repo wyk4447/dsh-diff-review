@@ -1,6 +1,6 @@
 # dsh-diff-review
 
-[![version](https://img.shields.io/badge/version-1.0.7-18BAE5)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.0.8-18BAE5)](CHANGELOG.md)
 [![dsh](https://img.shields.io/badge/dsh-%E2%89%A50.2.1--rc.1-D6F3FA)](https://github.com/wyk4447/dsh-diff-review#%E5%AE%89%E8%A3%85)
 [![license](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 
@@ -314,6 +314,15 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 - 按钮**常驻顶栏**，包括空面板——关掉之后本来就永远没有待审项，回来的路只能挂在栏上
 - 关着时变成「已关闭 · 恢复审核」，面板上另有一行说明，免得安静的界面看起来像坏了
 - 按对话记，`api.list` 下发的是 `{s1: true}` 这样的表，一个对话开着不会影响另一个
+- 关掉之后**面板也不会再自己冒出来**：宿主会把所有对话的待审项一起报给界面，以前任何一条都能把面板顶到你面前（包括别的对话、子代理会话），现在只有你眼前这个对话有资格。想看去「本轮改动」里翻
+
+### 什么时候会自己弹出来
+
+只有一件事会把面板推到你面前：**你正在看的这个对话**出现了新的待审改动。
+
+- 后台对话、子代理会话的改动照样排队、照样记进「本轮改动」，只是不抢焦点——它们不是你此刻在看的东西
+- 被挡下的改动**不算「见过」**，你切到那个对话时它还会正常弹一次
+- 关掉审核（「本会话不审核」）的对话什么都不弹，因为那边根本不会有新东西排进来
 
 ### `/diff-review` 命令
 
@@ -450,7 +459,7 @@ dsh plugin add github:wyk4447/dsh-diff-review
 
 ```powershell
 node test\gate.test.mjs      # 闸门：拦截 / 放行 / 接受 / 拒绝 / 中断 / 自我豁免 / 兜底 / 还原 / 多文件 / 二进制 / 格式化 / 面板内改写 / 历史统计 / 清空 / 同轮合并 / 本会话不审核
-node test\render.test.cjs    # 面板：空态 / 改动视图 / 全文视图 / 滚动同步 / 多文件 / 命令级 / 全部允许 / 本会话不审核 / 历史分组 / 编辑器 / 清空按钮 / 侧栏图标
+node test\render.test.cjs    # 面板：空态 / 改动视图 / 全文视图 / 滚动同步 / 多文件 / 命令级 / 全部允许 / 本会话不审核 / 历史分组 / 编辑器 / 清空按钮 / 侧栏图标 / 只给眼前的对话弹面板
 node test\history.test.mjs   # 快照库：去重 / 上限回收 / 跨对话隔离 / 索引损坏 / 可还原性判定 / 占用统计 / 按轮清空 / 同轮合并成一条
 node test\shell.test.mjs     # 命令识别矩阵：重定向 / 管道 / git / 打包解包 / 包装器 / copy-move-rename / 旗标 / 长脚本 / 交给宿主跑的脚本 / 表达式参数 / 「有意不拦」清单
 node test\switches.test.mjs  # 审核开关：读写 / 删键 / 两窗口互不覆盖 / 损坏文件 / 写失败必须上报
@@ -461,7 +470,7 @@ node scripts\smoke.mjs       # 装配冒烟：包内容 / manifest / 宿主模�
 node scripts\lint.mjs        # 体检：每个文件能解析 / 中英词典键完全一致 / 每个查表都有键
 ```
 
-断言数：闸门 **569**、快照库 **142**、命令矩阵 **91**、开关 **23**、路由 **29**、命令 **21**、诊断日志 **6**（合计 **1056**），面板 **15 组**，冒烟 **39** 项，体检 **122** 项。
+断言数：闸门 **569**、快照库 **142**、命令矩阵 **91**、开关 **23**、路由 **29**、命令 **21**、诊断日志 **6**（合计 **1060**），面板 **16 组**，冒烟 **39** 项，体检 **122** 项。
 
 > `npm test` / `npm run check` 把上面这些按顺序跑一遍；但**在含非 ASCII 字符的路径下 `npm` 认不出 `package.json`**（Windows 乱码路径报「Can't find package.json」）。本仓库所在路径就是这种，所以直接用 `node test\xxx.mjs`。
 >
@@ -483,9 +492,9 @@ node scripts\lint.mjs        # 体检：每个文件能解析 / 中英词典键�
 </details>
 
 <details>
-<summary><b>面板测试的 15 组覆盖 + 快照库 142 项断言</b>（点开）</summary>
+<summary><b>面板测试的 16 组覆盖 + 快照库 142 项断言</b>（点开）</summary>
 
-用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch，共 15 组：`empty diag`、`unified + full`、`multi-file review`、**`in-place rewrite`**、删除措辞与目录条目与全屏按钮、`scroll sync`、`command-level review`、`allow-all-switch`、**`session-off-switch`**、`session-scoped title`、`guide artwork`、**`history totals and clear buttons`**、**`computed target review`**、**`keyboard, narrow column and dismissible failure`**，最后是 `client render smoke`。
+用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch，共 16 组：`empty diag`、`unified + full`、`multi-file review`、**`in-place rewrite`**、删除措辞与目录条目与全屏按钮、`scroll sync`、`command-level review`、`allow-all-switch`、**`session-off-switch`**、`session-scoped title`、`guide artwork`、**`history totals and clear buttons`**、**`computed target review`**、**`keyboard, narrow column and dismissible failure`**、**`only the on-screen conversation raises its panel`**，最后是 `client render smoke`。
 
 具体验证：空态六行诊断（最后一行「轮次」，宿主一次都没报过轮次时显示 `-`）、改动视图有 `+`/`-` 标记、改写行只有真正变化的那几个字被加深高亮（前缀不被误涂）、全文视图有双栏与 gutter 竖条、**拖动一侧另一侧同步且不回弹**、**多文件时上面出现文件条并写「2 个文件」、列出两个文件名、默认画第一个文件的 diff、二进制那格报字节数而不是「该文件内容未变」**、删除态第二栏显示「文件将被删除」、命令级审查不出空代码区且用「无法预知最终内容」而不是「改动过大」、**命令级审查先给步骤清单（`切换目录`、`设置`、`写入` 三行，并单独点出目标文件）、原命令默认折叠、点开后才显示原文并能再收起**、命令级条目不再编造文件名（`iex $code` 的面板不显示任何文件名）、「全部允许」开关始终在顶栏、**放行之后队列清空的那一屏也仍然在**、**一个对话的开关状态不会串到另一个对话**、关掉后仍能找到入口、**标签页计数只算本对话**、侧栏「开始」页的画走 `guide` 条目自己的 `icon`（不是清单里的 `icon.svg`）、**历史屏幕在有记录时列出条目并标「已还原」、且只给可还原的条目出「还原」按钮（已还原的、已拒绝的、快照不完整的都不出）、「已按你的版本落盘」条目出按钮且标出自己的状态**、**历史按轮次分组：本轮默认展开、更早的轮次折叠并写「N 个文件 · +X -Y」，本轮的文件可见而更早轮次的不出现**、**编辑器：右侧是 `textarea` 且装着模型给的新文、底部报字节数、有「应用 / 放弃」，命令与删除不出现「改一下」**、**历史勾当：顶栏写「2 条 · 1.5 KB」，历史屏有「清空全部」与每轮的「清空这一轮」，两个按钮都带 `data-danger`**、**就地改写：命令行里的两个文件名各自出现在文件条上、每格标「内容由工具决定」而不是「该文件内容未变」、也不再笼统地写「命令操作，无法预知最终内容」**。
 

@@ -69,6 +69,11 @@ React.forcedBools = null
 React.forcedEditText = null
 React.falseCount = 0
 React.fullscreenCalls = []
+React.openCalls = []
+React.openTabCalls = 0
+// The Session the stub host reports as on screen. `null` means the host does not
+// publish the accessor at all, which is the no-filtering fallback.
+React.mountedSession = null
 React.refs = []
 React.scrollers = []
 
@@ -119,7 +124,20 @@ const ctx = {
     register: (definition) => { tabDefinition = definition; return () => {} },
   },
   sidebarRight: {
-    openTabIn: () => {},
+    // Recording rather than ignoring: the poller pushes the panel in front of the
+    // reader when a new change arrives, and which conversation earns that is the
+    // thing under test. The host service face is `openTabIn(sid, …)` plus
+    // `openTab(kind, …)`; both are tracked so a test can tell an open from none.
+    openTabIn: (sid) => { React.openCalls.push(sid) },
+    openTab: () => { React.openTabCalls += 1 },
+    // The Session on screen. Real hosts publish it as an `ObservableSnapshot`;
+    // `null` here means the stub host does not offer the accessor at all, which
+    // is the fallback path (no filtering). A getter, because the test changes the
+    // on-screen Session between cases.
+    get mounted() {
+      if (React.mountedSession === null) return undefined
+      return { getSnapshot: () => React.mountedSession, subscribe: () => () => {} }
+    },
     // The column's own fullscreen control is reached through these two: a target
     // has to be captured before the action can be asked for.
     commandTarget: () => ({ host: 'dock', id: 't1' }),
@@ -1048,6 +1066,72 @@ async function main() {
   if (!out.includes('dshr-note-text')) throw new Error('the failure had no text of its own')
   if (!out.includes('宿主拒绝了这个请求')) throw new Error('the failure was not written for a reader')
   console.log('keyboard, narrow column and dismissible failure: OK')
+
+  // 9) whose change is allowed to push the panel in front of the reader.
+  // The host answers the poll with every conversation's pending changes. Opening a
+  // tab for one of those put an empty panel on screen — the tab filters to its own
+  // Session and finds nothing — and it did so even in a conversation where review
+  // was switched off, because the switch stops the gate and never stopped this.
+  const OPEN_DELAYS = [120, 900, 2500]
+  // The retry chain reuses the same timer channel, and `poll()` removes its own
+  // timer from the middle of the queue — so the open timers are taken by delay
+  // rather than by position.
+  async function runOpenTimers() {
+    for (;;) {
+      const index = windowStub.timers.findIndex((entry) => OPEN_DELAYS.includes(entry.delay))
+      if (index === -1) break
+      const entry = windowStub.timers.splice(index, 1)[0]
+      await entry.fn()
+      await settle()
+    }
+  }
+  React.mountedSession = 's1'
+  // Earlier cases left their own opens queued and this group drains the timer
+  // channel, so those are run off first and the count then starts from zero.
+  await runOpenTimers()
+  React.openCalls = []
+  // 9a) a change from another conversation: the reader is looking at s1, so s2's
+  // change must not raise anything. Not even once.
+  listPayload = {
+    ok: true,
+    value: {
+      changes: [{ id: 'o1', sessionId: 's2', tool: 'write', displayPath: 'D:/w/other.js', op: 'update', added: 1, removed: 0, oldLineCount: 0, newLineCount: 1, truncated: false, reviewable: true }],
+      diag: null,
+      allowAll: {},
+      off: {},
+    },
+  }
+  await poll()
+  await runOpenTimers()
+  if (React.openCalls.length !== 0) throw new Error('another conversation\u2019s change opened a panel: ' + JSON.stringify(React.openCalls))
+
+  // 9b) the same change, now belonging to the conversation on screen: the panel is
+  // pushed in, exactly once even though the poll keeps answering with it.
+  listPayload.value.changes[0] = { id: 'o2', sessionId: 's1', tool: 'write', displayPath: 'D:/w/mine.js', op: 'update', added: 1, removed: 0, oldLineCount: 0, newLineCount: 1, truncated: false, reviewable: true }
+  await poll()
+  await runOpenTimers()
+  if (React.openCalls.length !== 1 || React.openCalls[0] !== 's1') throw new Error('the on-screen conversation\u2019s change did not open its panel: ' + JSON.stringify(React.openCalls))
+  await poll()
+  await runOpenTimers()
+  if (React.openCalls.length !== 1) throw new Error('the same change opened the panel twice')
+
+  // 9c) review switched off for the conversation on screen: nothing is asked, so
+  // nothing may be opened either.
+  listPayload.value.changes[0] = { id: 'o3', sessionId: 's1', tool: 'write', displayPath: 'D:/w/off.js', op: 'update', added: 1, removed: 0, oldLineCount: 0, newLineCount: 1, truncated: false, reviewable: true }
+  listPayload.value.off = { s1: true }
+  await poll()
+  await runOpenTimers()
+  if (React.openCalls.length !== 1) throw new Error('a silenced conversation still raised a panel')
+
+  // 9d) a host with no `mounted` accessor cannot be asked whose conversation is on
+  // screen, so the old behaviour stands: a pending change is worth showing.
+  React.mountedSession = null
+  listPayload.value.changes[0] = { id: 'o4', sessionId: 's9', tool: 'write', displayPath: 'D:/w/unknown.js', op: 'update', added: 1, removed: 0, oldLineCount: 0, newLineCount: 1, truncated: false, reviewable: true }
+  listPayload.value.off = {}
+  await poll()
+  await runOpenTimers()
+  if (React.openCalls.length !== 2) throw new Error('a host without the accessor stopped opening panels: ' + JSON.stringify(React.openCalls))
+  console.log('only the on-screen conversation raises its panel: OK')
 
   console.log('client render smoke: OK')
 }
