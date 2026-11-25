@@ -835,6 +835,10 @@ async function main() {
         // file still holds what they wrote, so the undo has to be offered and the
         // row has to say which version is on disk.
         { id: 'h6', path: 'D:/w/edited.js', op: 'update', state: 'applied', restorable: true, verify: { kind: 'sha', sha: 'dd' }, restoredAt: null },
+        // Nobody answered a removal, so the gate refused it. The file is still
+        // there and nothing was replaced: the row has to say it was not run, and
+        // it must not offer to undo a change that never happened.
+        { id: 'h7', path: 'D:/w/kept.js', op: 'delete', state: 'blocked', restorable: true, verify: { kind: 'sha', sha: 'ee' }, restoredAt: null },
       ],
     },
   }
@@ -862,6 +866,8 @@ async function main() {
   const undoButtons = out.split('<dshr-btn>').filter((chunk) => /^(?:<data-[^>]*>)*还原/.test(chunk))
   if (undoButtons.length !== 3) throw new Error(`the history screen offered ${undoButtons.length} undos, expected 3`)
   if (!out.includes('已按你的版本落盘')) throw new Error('an entry written from the panel did not say whose version is on disk')
+  // A removal nobody answered reads as "not run", not as "accepted".
+  if (!out.includes('超时未确认 · 已拦下')) throw new Error('a blocked removal was not labelled as not run')
   if (out.includes('本会话还没有审查记录')) throw new Error('the history screen showed its empty hint with entries present')
   React.forcedHistory = false
   React.forcedList = null
