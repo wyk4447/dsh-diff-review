@@ -1957,6 +1957,44 @@ await call(route, 'decide', { id: resumedListed.value.changes[resumedListed.valu
 await resumedParked
 check('a session-less silence is refused', (await call(route, 'decide', { action: 'setSessionOff', value: true })).value.missing === true)
 
+/* ---- an unanswered delete is refused ---- */
+// A review nobody answers used to let the change through, whatever it was.
+// That is right for a write — the file is still there, and refusing it would
+// break work that was never in danger — and wrong for a delete: the bytes are
+// gone and nobody ever said yes. A delete that runs out of time is refused
+// instead of performed.
+//
+// The wait is a setting, so this needs its own instance: the gate waits
+// `timeoutMs` before it gives up, and the floor is a second.
+//
+// The gate's timer is unref'd — the host always has other work to do — so the
+// test has to keep the loop alive itself while it waits.
+const withHeartbeat = async (promise) => {
+  const keep = setInterval(() => {}, 50)
+  try {
+    return await promise
+  } finally {
+    clearInterval(keep)
+  }
+}
+{
+  const timeout = makeCtx()
+  apply(timeout.ctx, { trace: false, timeoutMs: 1, shellTimeoutMs: 1 })
+  const timeoutRoute = timeout.routes[0]
+  const timeoutGate = timeout.handlers.get('tools/pre-execute')
+  await call(timeoutRoute, 'list', {})
+
+  const parkedDelete = timeoutGate(exec('pwsh', { command: "Remove-Item -LiteralPath 'D:/w/a.txt'" }), next)
+  const deleteVerdict = await withHeartbeat(parkedDelete)
+  check('an unanswered delete is refused', deleteVerdict.kind === 'deny')
+  check('the refusal says it was not run', String(deleteVerdict.reason).includes('not confirmed in time'))
+
+  await call(timeoutRoute, 'list', {})
+  const parkedWrite = timeoutGate(exec('write', { file_path: 'D:/w/a.txt', content: 'late\n' }), next)
+  const writeVerdict = await withHeartbeat(parkedWrite)
+  check('an unanswered write still goes through', writeVerdict.kind === 'allow')
+}
+
 /* ---- not gated ---- */
 await call(route, 'list', {})
 check('read not gated', (await gate(exec('read', { file_path: 'D:/w/a.txt' }), next)).kind === 'allow')

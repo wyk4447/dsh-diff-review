@@ -1,6 +1,6 @@
 # dsh-diff-review
 
-[![version](https://img.shields.io/badge/version-1.0.5-18BAE5)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.0.6-18BAE5)](CHANGELOG.md)
 [![dsh](https://img.shields.io/badge/dsh-%E2%89%A50.2.1--rc.1-D6F3FA)](https://github.com/wyk4447/dsh-diff-review#%E5%AE%89%E8%A3%85)
 [![license](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 
@@ -315,9 +315,23 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 - 关着时变成「已关闭 · 恢复审核」，面板上另有一行说明，免得安静的界面看起来像坏了
 - 按对话记，`api.list` 下发的是 `{s1: true}` 这样的表，一个对话开着不会影响另一个
 
+### `/diff-review` 命令
+
+顶栏的两个开关，在输入框里也有对应的一条命令——**因为关了面板之后，恰恰是面板找不回来**：
+
+```
+/diff-review off      # 这个对话不再询问，也不再记录（等价于「本会话不审核」）
+/diff-review on       # 重新开始询问（顺带把「全部允许」一起收回）
+/diff-review status   # 现在什么状态：审查开/关、全部允许开/关、还有几项待审
+```
+
+- 命令只作用于**当前这个对话**，和面板上的两个开关是同两个开关（都落在 `~/.dsh/diff-review/review-off.json`）
+- `on` 会把「全部允许」一起收回：既然开口要「问我」，就该真的被问到
+- 宿主没有命令注册表时插件照常工作，只是没有这条命令（老版本 DSH 上不会有）
+
 ### 本轮改动与还原
 
-顶栏的「本轮改动」按钮切到另一个屏幕：**本对话审查过的改动**，从新到旧，带结果（已接受 / 已拒绝 / 已超时 / 已取消 / 开关放行 / 已按你的版本落盘）。
+顶栏的「本轮改动」按钮切到另一个屏幕：**本对话审查过的改动**，从新到旧，带结果（已接受 / 已拒绝 / 已超时 / **超时未确认 · 已拦下** / 已取消 / 开关放行 / 已按你的版本落盘）。
 
 **一个文件在一轮里只有一条**：模型回答一条消息时可能把同一个文件改五遍，列表里是那五遍合成的一条——起点是本轮开头的样子，终点是最后一次的结果，`+X -Y` 按**净变化**算（改来改去可能显示 +0 -0）。
 
@@ -332,7 +346,7 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 
 只记**新增 / 修改 / 删除**这三种真正落到文件上的操作。命令级条目（`iex $code`、只知命令不知效果的那种）不进历史——它没有可指认的文件，既还不了原也算不上一条改动，收进去只会把历史变成没人翻的日志。
 
-- 每条在**受理之前**就已经抓好了原文快照，所以哪怕是你点了「接受」、5 分钟超时自动放行、被「全部允许」直接放过，或者在面板里改成自己的版本，都能在这里把它还给磁盘
+- 每条在**受理之前**就已经抓好了原文快照，所以哪怕是你点了「接受」、5 分钟超时自动放行（**删除除外：超时的删除会被拦下**）、被「全部允许」直接放过，或者在面板里改成自己的版本，都能在这里把它还给磁盘
 - 被开关放过的条目标「开关放行」而不是「已接受」：没人看过它，列表不该假装看过；在面板里改过的标「已按你的版本落盘」，因为磁盘上确实是你的字节
 - 能还原的条目右边有「还原」；还原过的会标「已还原」，再点是拒绝（`already-restored`）
 - **文件在那之后又变过就拒绝**：还原前会核对当前内容是否仍是那次改动写下去的样子（删除则核对文件是否仍然不存在），不一致直接报「文件在此之后又变过，已拒绝还原」。宁可不动，也不悄悄覆盖别人后来的写入。**核对由宿主原子完成**（写回时带上「我看到的版本号」，对不上就拒写），不是读一遍再写一遍中间留个空档
@@ -357,7 +371,7 @@ DeepSeek Harness 插件。零运行时依赖，不改宿主任何内置插件。
 |---|---|---|
 | 侧边栏没打开 / 页面已关闭 | 放行 | 没人能审批时不能把 agent 卡死 |
 | 你中断本轮（Esc） | 取消当次调用 | 跟随 `exec.signal` |
-| 5 分钟没人理 | 放行 | 未答复不等于拒绝；原文快照已经抓好，事后仍可在「本轮改动」里还原 |
+| 5 分钟没人理 | 写入放行；**删除拦下** | 未答复不等于拒绝，但删除拿不回来：没人点头的删除干脆别做（历史里标「超时未确认 · 已拦下」，文件原样还在） |
 | 插件自己的源码 | 放行 | 否则插件坏了就再也修不了（自锁） |
 | 临时目录 / 工作区 `.dsh/` | 放行 | `skipTemp` / `skipScratch`（`.dsh-tmp`、`.dshtmp` 这类只是名字像的不在此列） |
 | 生成物目录（`__pycache__`、`node_modules`、`dist`、`build`、`out`、`target`、`obj`、`coverage`、`.venv`、`vendor` 等） | 放行 | `skipNoise`。整段匹配：`dist/` 跳过，`distro/`、`my-dist/`、`builder/` 照问；`bin`/`lib`/`public`/`src` 这类可能有人手写文件的目录、以及 `.git/`（`hooks/pre-commit` 会在下次提交时执行）**都不在名单里** |
@@ -431,7 +445,7 @@ dsh plugin add github:wyk4447/dsh-diff-review
 
 ## 自测
 
-六套离线测试 + 两个检查脚本，不连 GUI、不写真文件：
+七套离线测试 + 两个检查脚本，不连 GUI、不写真文件：
 
 ```powershell
 node test\gate.test.mjs      # 闸门：拦截 / 放行 / 接受 / 拒绝 / 中断 / 自我豁免 / 兜底 / 还原 / 多文件 / 二进制 / 格式化 / 面板内改写 / 历史统计 / 清空 / 同轮合并 / 本会话不审核
@@ -440,11 +454,12 @@ node test\history.test.mjs   # 快照库：去重 / 上限回收 / 跨对话隔�
 node test\shell.test.mjs     # 命令识别矩阵：重定向 / 管道 / git / 打包解包 / 包装器 / copy-move-rename / 旗标 / 长脚本 / 交给宿主跑的脚本 / 表达式参数 / 「有意不拦」清单
 node test\switches.test.mjs  # 审核开关：读写 / 删键 / 两窗口互不覆盖 / 损坏文件 / 写失败必须上报
 node test\routes.test.mjs    # 路由层：状态码 / 原型污染 / 空 body / 超大 body / 错误码
+node test\command.test.mjs   # /diff-review 命令：注册 / on / off / status / 复合会话 id / 落盘
 node scripts\smoke.mjs       # 装配冒烟：包内容 / manifest / 宿主模块导出 / 装上之后的路由、闸门、接管、会话订阅
 node scripts\lint.mjs        # 体检：每个文件能解析 / 中英词典键完全一致 / 每个查表都有键
 ```
 
-断言数：闸门 **566**、快照库 **128**、命令矩阵 **91**、开关 **23**、路由 **29**（合计 **1010**），面板 **14 组**，冒烟 **39** 项，体检 **120** 项。
+断言数：闸门 **569**、快照库 **128**、命令矩阵 **91**、开关 **23**、路由 **29**、命令 **21**（合计 **1036**），面板 **15 组**，冒烟 **39** 项，体检 **121** 项。
 
 > `npm test` / `npm run check` 把上面这些按顺序跑一遍；但**在含非 ASCII 字符的路径下 `npm` 认不出 `package.json`**（Windows 乱码路径报「Can't find package.json」）。本仓库所在路径就是这种，所以直接用 `node test\xxx.mjs`。
 >
@@ -453,7 +468,7 @@ node scripts\lint.mjs        # 体检：每个文件能解析 / 中英词典键�
 > 闸门与快照测试都把存储根指到系统临时目录（`DSH_DIFF_REVIEW_HISTORY_ROOT`）并在结束时删掉，跑测试不会往你的 `~/.dsh` 里塞任何东西。
 
 <details>
-<summary><b>闸门测试覆盖的 566 项断言</b>（点开）</summary>
+<summary><b>闸门测试覆盖的 569 项断言</b>（点开）</summary>
 
 `not-armed` 放行、布防后挂起、`decide accept` 放行、`decide reject` 拒绝且 reason 带路径、`abort` 取消、`edit` diff 两侧、`pwsh` 删除挂起与接受、`pwsh` 字面写入出真 diff（覆盖 / 追加 / 重定向 / 新建四种）、同一命令里赋值后写出的变量（`$t = 'one'; Set-Content -Value $t`、反引号转义还原、`$p = 'D:/w/a.txt'; Remove-Item $p` 解析成真实文件、`$dir` 参与路径拼接、`"hello $n"` 插值）、运行期才算出来的值照问并标成「内容由工具决定」（`$t = 'a' + 'b'`、`$env:USERNAME`、`$js > a.txt`）、按形状识别的改写命令（`Set-Item`/`Rename-Item`/`New-Item`/`Tee-Object`/`Export-Csv`/`[IO.File]::Delete`/`cmd /c del`/`iex`/`Invoke-Expression`/`node -e`/`python -c`/`powershell -EncodedCommand`/`git clean`/`git checkout --`/管道右端无目标）且参数是字面量时仍出真 diff、形状命中但没有文件名的条目（`iex`/`git clean`/管道右端）标记为命令级且不带路径（`op === 'shell'`、`displayPath` 为空，避免把动词当成文件名）、只碰一个已知文件且内容看不见的写入照问并标成「内容由工具决定」、**路径要运行时才算出来的写照问**（`Set-Content -Path (Join-Path $dir 'a.txt') -Value 'hi'` 与 `Set-Content -Path $out -Value 'hi'` 都会挂起、标 `computed-target`、面板不列假文件名、点拒绝真的没写）、`-WhatIf`/`Get-ChildItem`/`Write-Host`/`New-Object`/`Add-Type`/`Clear-Host`/`git status`/`node --version` 放行、通配与变量目标的命令级确认（`$p`/`"${target}"`/`$out`）且文件名里的字面 `$` 不被误判、脚本块里的删除（`if (...) { ... }`、`foreach (...) { ... }`、`& { ... }`）、同一命令内赋值参与路径解析、逗号并列多个目标、同一文件被写两次时顶栏只出现一次而两个不同文件按顺序都出现、`$env:TEMP` 目标按临时目录放行、自我豁免、临时目录豁免、工作区 `.dsh/` 整个目录豁免且不误豁免 `.dsh-tmp`/`.dshtmp`、`header.cwd` 缺失时用 `workingDirectory` 兜底、`ctx.get` 抛异常时仍能挂起、**全部允许**（同一轮里后续写入直接放行且诊断记为 `allow-all`、文件被删除或改名仍照问而 `Clear-Content` 直接过、`turn/end` 与新一轮提问都不动这个开关、关掉开关不需要有待审项、关掉之后的下一次写入重新挂起、**按对话记**——开在一个对话上不会放行另一个、关掉一个不会动另一个、不带对话的开关请求被拒绝 `missing`）、同一条命令里写出来又删掉的临时文件直接放行而删掉一个本来就存在的文件仍照问、**一个对话的改动不会被另一个对话看到或决定**（`list` 只回本会话、`detail`/`decide` 对别的会话返回 `missing` 且记录仍挂着）、**还原链路**（接受过的写入出现在历史里且带 `accepted` 状态与可用快照、还原后文件回到原文、第二次还原被拒 `already-restored`、文件在审查之后又被改过则拒绝还原 `stale` 且新内容保留、已拒绝的改动不给还原 `not-applied`、删除可以还原且字节真的回来了、别的对话既看不到这些历史也还原不了、不存在的 id 返回 `missing`）、**多文件审查**（一条命令碰两个文件只挂起一次、`files` 里两条、`detail.files` 各带自己的 rows 与新文与路径、接受后放行）、**二进制**（`.png` 被识别成 `binary`、不给行数、报 `0 → 1` 字节、`reviewable` 为真、不说「无法预知」、接受后放行）、**纯格式与纯换行**（重新缩进标 `note === 'formatting'`、CRLF 重写标 `note === 'line-endings'`，两种都仍可接受）、**按参数判定**（`mcp__fs__write_file` 被拦且新文能出 diff、`mcp__fs__read_file` 放行、`grep({pattern: 'write'})` 放行、`write_log({level, message})` 无路径放行）、**内联脚本只读识别**（`node -e` 读文件打印长度、`node -p process.version`、`python -c` 读文件打印、`sys.stdout.write` 打印、`console.log('write this to stdout')`、`readdirSync` 列表、`csv.reader` 读表共七种放行；`writeFileSync`、`appendFileSync`、`promises.unlink`、`open(...,'w')`、`shutil.copy`、`os.replace`、`child_process.execSync`、`eval(payload)` 共八种照常挂起并标 `shell-command`；一条只读脚本配一条写入脚本时整条仍挂起；**当初引发这次改动的「读 YAML 打印两个长度」那条命令不再挂起**）。
 **`.NET` 按归属判定**：`[SHA256]::Create()`、`SHA256]::Create()` 后接 `ComputeHash`、`ReadAllBytes` + `Encoding::UTF8.GetString`、`Path]::GetFileName` 四种只碰内存的调用都放行；路径是表达式的 `[System.IO.File]::WriteAllText($p, …)` 仍挂起；当初被误拦的那条算哈希命令不再挂起且队列清空。
@@ -466,9 +481,9 @@ node scripts\lint.mjs        # 体检：每个文件能解析 / 中英词典键�
 </details>
 
 <details>
-<summary><b>面板测试的 13 组覆盖 + 快照库 128 项断言</b>（点开）</summary>
+<summary><b>面板测试的 15 组覆盖 + 快照库 128 项断言</b>（点开）</summary>
 
-用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch，共 12 组：`empty diag`、`unified + full`、`multi-file review`、**`in-place rewrite`**、删除措辞与目录条目与全屏按钮、`scroll sync`、`command-level review`、`allow-all-switch`、**`session-off-switch`**、`session-scoped title`、`guide artwork`、**`history totals and clear buttons`**，最后是 `client render smoke`。
+用 `node:vm` 跑真实的 `lib/client.js`，桩掉 React/DOM/fetch，共 15 组：`empty diag`、`unified + full`、`multi-file review`、**`in-place rewrite`**、删除措辞与目录条目与全屏按钮、`scroll sync`、`command-level review`、`allow-all-switch`、**`session-off-switch`**、`session-scoped title`、`guide artwork`、**`history totals and clear buttons`**、**`computed target review`**、**`keyboard, narrow column and dismissible failure`**，最后是 `client render smoke`。
 
 具体验证：空态六行诊断（最后一行「轮次」，宿主一次都没报过轮次时显示 `-`）、改动视图有 `+`/`-` 标记、改写行只有真正变化的那几个字被加深高亮（前缀不被误涂）、全文视图有双栏与 gutter 竖条、**拖动一侧另一侧同步且不回弹**、**多文件时上面出现文件条并写「2 个文件」、列出两个文件名、默认画第一个文件的 diff、二进制那格报字节数而不是「该文件内容未变」**、删除态第二栏显示「文件将被删除」、命令级审查不出空代码区且用「无法预知最终内容」而不是「改动过大」、**命令级审查先给步骤清单（`切换目录`、`设置`、`写入` 三行，并单独点出目标文件）、原命令默认折叠、点开后才显示原文并能再收起**、命令级条目不再编造文件名（`iex $code` 的面板不显示任何文件名）、「全部允许」开关始终在顶栏、**放行之后队列清空的那一屏也仍然在**、**一个对话的开关状态不会串到另一个对话**、关掉后仍能找到入口、**标签页计数只算本对话**、侧栏「开始」页的画走 `guide` 条目自己的 `icon`（不是清单里的 `icon.svg`）、**历史屏幕在有记录时列出条目并标「已还原」、且只给可还原的条目出「还原」按钮（已还原的、已拒绝的、快照不完整的都不出）、「已按你的版本落盘」条目出按钮且标出自己的状态**、**历史按轮次分组：本轮默认展开、更早的轮次折叠并写「N 个文件 · +X -Y」，本轮的文件可见而更早轮次的不出现**、**编辑器：右侧是 `textarea` 且装着模型给的新文、底部报字节数、有「应用 / 放弃」，命令与删除不出现「改一下」**、**历史勾当：顶栏写「2 条 · 1.5 KB」，历史屏有「清空全部」与每轮的「清空这一轮」，两个按钮都带 `data-danger`**、**就地改写：命令行里的两个文件名各自出现在文件条上、每格标「内容由工具决定」而不是「该文件内容未变」、也不再笼统地写「命令操作，无法预知最终内容」**。
 
@@ -479,6 +494,8 @@ node scripts\lint.mjs        # 体检：每个文件能解析 / 中英词典键�
 `test/switches.test.mjs` 管审核开关：读写、删键、**两个窗口各写各的不会互相抹掉**、坏文件读作「没关任何对话」、版本不对时忽略、只留真值、**写失败必须报 `saved:false`**（落盘不成功却回「已关闭」，是比没关更糟的一种骗人）。
 
 `test/routes.test.mjs` 管路由层：200/405/404/400/403、**`__proto__`/`constructor`/`toString`/`hasOwnProperty` 都不算方法**、空 body 当「无参数」返回 200、超大 body 报 400、`applyEdited` 的 missing/empty/unchanged/not-editable、`restore` 的 missing、**受保护的位置仍然只审查不还原**。
+
+`test/command.test.mjs` 管 `/diff-review`：命令注册上了、`off` 真的落盘（写进 `review-off.json`）、`on` 真的把这条从名单里删掉、`status` 说得清现在的状态、**宿主给的复合会话 id（`session-…@D:\wp`）要落到裸 id 上**（落到另一个键上看起来像成功了，其实什么都没变）、不认识的说法给用法而不是默默不理。
 
 `scripts/smoke.mjs` 是装配冒烟：包里该有的文件都在、manifest 字段齐、宿主模块导出的东西齐、**装上去之后路由、闸门、接管、会话订阅都真的挂上了**、`lib/client.js` 在 VM 里能注册。
 
@@ -544,4 +561,4 @@ Select-String -Path ~\.dsh\logs\diff-review.log -Pattern '"tool":"write"'
 - **通道**：自建同源 HTTP 路由 `/diff-review/api/{list,detail,decide,history,historyClear,historyDetail,restore,applyEdited}`，前面挂 `ctx.connection.requestRejection` 做浏览器信任校验。Electron 壳把 `dsh-app://app/` 的请求转发到 Host 并自动带认证 cookie，所以浏览器侧同源可达；从 Node 直接探测会 403，属正常。
 - **diff**：自己算 LCS（`Int32Array` DP，超 400 万格降级为全删全增），零外部依赖。
 - **布防**：侧边栏轮询 `list`，该调用同时刷新心跳；心跳 180s 内有效才算「布防」，否则一律放行。**有改动时 1.2s 一次、没事时 5s 一次、页面看不见时 15s 一次**，同一时刻只发一个请求——原来是不管有没有事都每 1.2s 敲一次门（一分钟 75 次）。窗口不可见时 Chromium 把定时器压到约 60s 一跳，窗口必须留得比这个大，否则切走窗口就等于放行。
-- **快照**：`lib/history.js`，整份原文副本而不是补丁链（补丁链要每一跳都能重放，副本就是状态本身，还原不会半路失败）。内容寻址（`sha256` 命名 blob）自动去重，`index.json` 先写临时文件再 rename（临时名带进程号与计数，两个窗口不会撞名）。**索引先落盘、blob 后回收**：反过来写的话，崩在两步之间会让整个对话的还原无声失效，而面板显示成空 diff。索引坏了读成空、坏文件改名留底、统计里标出「这个对话的索引坏过」——不抛异常，因为抛异常会连带闸门一起挂掉。抓取时机在**你答复之前**——超时是 fail-open 放行，等答复完再抓原文已经没了。删除走 `ctx.fs.deleteFile`、还原走 `ctx.fs.writeText`，还原时带上宿主给的版本号做原子校验（对不上就拒写），另有一层路径围栏挡住 `.git/`、DSH 自己的目录、`~/.dsh/` 与 Windows 系统目录。
+- **快照**：`lib/history.js`，整份原文副本而不是补丁链（补丁链要每一跳都能重放，副本就是状态本身，还原不会半路失败）。内容寻址（`sha256` 命名 blob）自动去重，`index.json` 先写临时文件再 rename（临时名带进程号与计数，两个窗口不会撞名）。**索引先落盘、blob 后回收**：反过来写的话，崩在两步之间会让整个对话的还原无声失效，而面板显示成空 diff。索引坏了读成空、坏文件改名留底、统计里标出「这个对话的索引坏过」——不抛异常，因为抛异常会连带闸门一起挂掉。抓取时机在**你答复之前**——超时是 fail-open 放行（**删除除外：没人点头的删除会被拦下，文件原样还在**），等答复完再抓原文已经没了。删除走 `ctx.fs.deleteFile`、还原走 `ctx.fs.writeText`，还原时带上宿主给的版本号做原子校验（对不上就拒写），另有一层路径围栏挡住 `.git/`、DSH 自己的目录、`~/.dsh/` 与 Windows 系统目录。
